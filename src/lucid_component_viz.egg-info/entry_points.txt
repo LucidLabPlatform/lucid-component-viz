@@ -1,0 +1,2 @@
+[lucid_components]
+viz = lucid_component_viz.component:VizComponent

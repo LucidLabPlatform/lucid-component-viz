@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools_scm[toml]>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucid-component-viz"
+dynamic = ["version"]
+description = "LUCID visualization component: supervises arena.py and TouchDesigner processes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+  "lucid-component-base @ git+https://github.com/LucidLabPlatform/lucid-component-base@v2.0.0",
+  "psutil>=5.9.0",
+  "pygame>=2.5.0",
+  "paho-mqtt>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.entry-points."lucid_components"]
+viz = "lucid_component_viz.component:VizComponent"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lucid_component_viz*"]
+
+[tool.setuptools.package-data]
+lucid_component_viz = ["arena/*.py"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
