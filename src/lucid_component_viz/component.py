@@ -99,8 +99,6 @@ class VizComponent(Component):
 
     def _start(self) -> None:
         self._publish_all_retained()
-        self._start_arena()
-        self._start_touchdesigner()
         self._stop_event.clear()
         self._health_thread = threading.Thread(
             target=self._health_loop, name="LucidVizHealth", daemon=True,
@@ -139,13 +137,16 @@ class VizComponent(Component):
                 "AGENT_USERNAME": os.getenv("AGENT_USERNAME", ""),
                 "AGENT_PASSWORD": os.getenv("AGENT_PASSWORD", ""),
             })
+            log_dir = os.path.join(os.getenv("LUCID_AGENT_BASE_DIR", "."), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            arena_log = open(os.path.join(log_dir, "arena.log"), "a")
             self._arena_proc = subprocess.Popen(
                 [sys.executable, arena_path],
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=arena_log,
+                stderr=arena_log,
             )
-            self._log.info("Started arena.py (pid=%s)", self._arena_proc.pid)
+            self._log.info("Started arena.py (pid=%s), log: %s/arena.log", self._arena_proc.pid, log_dir)
             return True
         except Exception:
             self._log.exception("Failed to start arena.py")
@@ -229,8 +230,10 @@ class VizComponent(Component):
             return ""
 
     def on_cmd_start_arena(self, payload_str: str) -> None:
+        self._log.info("cmd/start_arena received: %s", payload_str)
         request_id = self._parse_request_id(payload_str)
         ok = self._start_arena()
+        self._log.info("start_arena result: ok=%s, request_id=%s", ok, request_id)
         self.publish_state()
         self.publish_result("start_arena", request_id, ok=ok, error=None if ok else "failed to start")
 
