@@ -1,7 +1,0 @@
-lucid-component-base @ git+https://github.com/LucidLabPlatform/lucid-component-base@v2.0.0
-psutil>=5.9.0
-pygame>=2.5.0
-paho-mqtt>=2.0.0
-
-[dev]
-pytest
