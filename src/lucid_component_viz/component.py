@@ -73,8 +73,8 @@ class VizComponent(Component):
 
     def capabilities(self) -> list[str]:
         return [
-            "start_arena", "stop_arena",
-            "start_touchdesigner", "stop_touchdesigner",
+            "start-arena", "stop-arena",
+            "start-touchdesigner", "stop-touchdesigner",
             "restart",
         ]
 
