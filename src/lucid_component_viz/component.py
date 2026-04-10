@@ -185,7 +185,7 @@ class VizComponent(Component):
             self._log.info("TouchDesigner already running")
             return True
         try:
-            cmd = ["open", "-W", "-a", self._touchdesigner_app]
+            cmd = ["open", "-a", self._touchdesigner_app]
             if self._touchdesigner_file:
                 cmd.append(self._touchdesigner_file)
             self._log.info("Launching TouchDesigner: %s", " ".join(cmd))
@@ -193,7 +193,7 @@ class VizComponent(Component):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=10,
             )
             if result.returncode != 0:
                 self._log.error(
@@ -251,39 +251,54 @@ class VizComponent(Component):
         request_id = self._parse_request_id(payload_str)
         ok = self._start_arena()
         self._log.info("start_arena result: ok=%s, request_id=%s", ok, request_id)
-        self.publish_state()
         self.publish_result("start_arena", request_id, ok=ok, error=None if ok else "failed to start")
+        try:
+            self.publish_state()
+        except Exception:
+            self._log.exception("publish_state failed after start_arena")
 
     def on_cmd_stop_arena(self, payload_str: str) -> None:
         request_id = self._parse_request_id(payload_str)
         ok = self._stop_arena()
-        self.publish_state()
         self.publish_result("stop_arena", request_id, ok=ok, error=None if ok else "failed to stop")
+        try:
+            self.publish_state()
+        except Exception:
+            self._log.exception("publish_state failed after stop_arena")
 
     def on_cmd_start_touchdesigner(self, payload_str: str) -> None:
         request_id = self._parse_request_id(payload_str)
         ok = self._start_touchdesigner()
-        self.publish_state()
         self.publish_result(
             "start_touchdesigner", request_id, ok=ok,
             error=None if ok else "failed to start",
         )
+        try:
+            self.publish_state()
+        except Exception:
+            self._log.exception("publish_state failed after start_touchdesigner")
 
     def on_cmd_stop_touchdesigner(self, payload_str: str) -> None:
         request_id = self._parse_request_id(payload_str)
         ok = self._stop_touchdesigner()
-        self.publish_state()
         self.publish_result(
             "stop_touchdesigner", request_id, ok=ok,
             error=None if ok else "failed to stop",
         )
+        try:
+            self.publish_state()
+        except Exception:
+            self._log.exception("publish_state failed after stop_touchdesigner")
 
     def on_cmd_restart(self, payload_str: str) -> None:
         request_id = self._parse_request_id(payload_str)
         self._stop_arena()
         self._stop_touchdesigner()
-        self.publish_state()
         self.publish_result("restart", request_id, ok=True, error=None)
+        try:
+            self.publish_state()
+        except Exception:
+            self._log.exception("publish_state failed after restart")
 
     def on_cmd_reset(self, payload_str: str) -> None:
         self.on_cmd_restart(payload_str)
