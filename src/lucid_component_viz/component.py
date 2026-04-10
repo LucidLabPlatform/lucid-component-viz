@@ -63,6 +63,9 @@ class VizComponent(Component):
         self._touchdesigner_app: str = self.context.config.get(
             "touchdesigner_app", "/Applications/TouchDesigner.app"
         )
+        self._touchdesigner_file: Optional[str] = self.context.config.get(
+            "touchdesigner_file", "/Users/roboticslab/Documents/WorkingProjectionV2.1.toe"
+        )
 
     @property
     def component_id(self) -> str:
@@ -93,7 +96,10 @@ class VizComponent(Component):
         }
 
     def get_cfg_payload(self) -> dict[str, Any]:
-        return {"touchdesigner_app": self._touchdesigner_app}
+        return {
+            "touchdesigner_app": self._touchdesigner_app,
+            "touchdesigner_file": self._touchdesigner_file,
+        }
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -179,12 +185,15 @@ class VizComponent(Component):
             self._log.info("TouchDesigner already running")
             return True
         try:
+            cmd = ["open", "-a", self._touchdesigner_app]
+            if self._touchdesigner_file:
+                cmd.append(self._touchdesigner_file)
             subprocess.Popen(
-                ["open", "-a", self._touchdesigner_app],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            self._log.info("Launched TouchDesigner")
+            self._log.info("Launched TouchDesigner (file=%s)", self._touchdesigner_file or "default")
             return True
         except Exception:
             self._log.exception("Failed to start TouchDesigner")
@@ -288,6 +297,10 @@ class VizComponent(Component):
         if "touchdesigner_app" in set_dict:
             self._touchdesigner_app = str(set_dict["touchdesigner_app"])
             applied["touchdesigner_app"] = self._touchdesigner_app
+        if "touchdesigner_file" in set_dict:
+            val = set_dict["touchdesigner_file"]
+            self._touchdesigner_file = str(val) if val is not None else None
+            applied["touchdesigner_file"] = self._touchdesigner_file
 
         self.publish_cfg()
         self.publish_cfg_set_result(
