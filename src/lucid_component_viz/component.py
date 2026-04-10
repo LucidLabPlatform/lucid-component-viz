@@ -185,14 +185,22 @@ class VizComponent(Component):
             self._log.info("TouchDesigner already running")
             return True
         try:
-            cmd = ["open", "-a", self._touchdesigner_app]
+            cmd = ["open", "-W", "-a", self._touchdesigner_app]
             if self._touchdesigner_file:
                 cmd.append(self._touchdesigner_file)
-            subprocess.Popen(
+            self._log.info("Launching TouchDesigner: %s", " ".join(cmd))
+            result = subprocess.run(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
+            if result.returncode != 0:
+                self._log.error(
+                    "TouchDesigner launch failed (exit=%s): %s",
+                    result.returncode, result.stderr.strip(),
+                )
+                return False
             self._log.info("Launched TouchDesigner (file=%s)", self._touchdesigner_file or "default")
             return True
         except Exception:
@@ -308,3 +316,4 @@ class VizComponent(Component):
             applied=applied if applied else None,
             error=None, ts=_utc_iso(), action="cfg/set",
         )
+
