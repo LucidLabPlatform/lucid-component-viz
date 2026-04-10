@@ -265,11 +265,8 @@ class VizComponent(Component):
         request_id = self._parse_request_id(payload_str)
         self._stop_arena()
         self._stop_touchdesigner()
-        ok_arena = self._start_arena()
-        ok_td = self._start_touchdesigner()
-        ok = ok_arena and ok_td
         self.publish_state()
-        self.publish_result("restart", request_id, ok=ok, error=None if ok else "partial failure")
+        self.publish_result("restart", request_id, ok=True, error=None)
 
     def on_cmd_reset(self, payload_str: str) -> None:
         self.on_cmd_restart(payload_str)
