@@ -6,6 +6,7 @@ Monitors health, publishes state/telemetry, and accepts start/stop commands.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import signal
@@ -101,6 +102,37 @@ class VizComponent(Component):
             "touchdesigner_file": self._touchdesigner_file,
         }
 
+    def schema(self) -> dict[str, Any]:
+        s = copy.deepcopy(super().schema())
+        s["publishes"]["state"]["fields"].update({
+            "arena": {
+                "type": "object",
+                "fields": {
+                    "running": {"type": "boolean"},
+                    "pid": {"type": "integer"},
+                },
+            },
+            "touchdesigner": {
+                "type": "object",
+                "fields": {
+                    "running": {"type": "boolean"},
+                    "pid": {"type": "integer"},
+                },
+            },
+        })
+        s["publishes"]["cfg"]["fields"].update({
+            "touchdesigner_app": {"type": "string"},
+            "touchdesigner_file": {"type": "string"},
+        })
+        s["subscribes"].update({
+            "cmd/start-arena": {"fields": {}},
+            "cmd/stop-arena": {"fields": {}},
+            "cmd/start-touchdesigner": {"fields": {}},
+            "cmd/stop-touchdesigner": {"fields": {}},
+            "cmd/restart": {"fields": {}},
+        })
+        return s
+
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     def _start(self) -> None:
@@ -124,6 +156,7 @@ class VizComponent(Component):
 
     def _publish_all_retained(self) -> None:
         self.publish_metadata()
+        self.publish_schema()
         self.publish_status()
         self.publish_state()
         self.publish_cfg()
