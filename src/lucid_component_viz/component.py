@@ -150,10 +150,8 @@ class VizComponent(Component):
             target=self._health_loop, name="LucidVizHealth", daemon=True,
         )
         self._health_thread.start()
-        mqtt = self.context.mqtt
-        if hasattr(mqtt, "subscribe"):
-            for suffix in _ARENA_TELEMETRY_SUFFIXES:
-                mqtt.subscribe(self.context.topic(suffix), self._on_arena_message)
+        for suffix in _ARENA_TELEMETRY_SUFFIXES:
+            self.subscribe(self.context.topic(suffix), self._on_arena_message)
         self._log.info("Started viz component")
 
     def _stop(self) -> None:
@@ -162,10 +160,8 @@ class VizComponent(Component):
         if t:
             t.join(timeout=3.0)
             self._health_thread = None
-        mqtt = self.context.mqtt
-        if hasattr(mqtt, "unsubscribe"):
-            for suffix in _ARENA_TELEMETRY_SUFFIXES:
-                mqtt.unsubscribe(self.context.topic(suffix))
+        for suffix in _ARENA_TELEMETRY_SUFFIXES:
+            self.unsubscribe(self.context.topic(suffix))
         self._stop_arena()
         self._stop_touchdesigner()
         self._log.info("Stopped viz component")
