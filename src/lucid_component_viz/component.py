@@ -19,6 +19,14 @@ from typing import Any, Optional
 
 from lucid_component_base import Component, ComponentContext
 
+# Telemetry topic suffixes the arena overlay consumes from this agent's viz component.
+_ARENA_TELEMETRY_SUFFIXES = [
+    "telemetry/aruco_confirmed",
+    "telemetry/puck_registry",
+    "telemetry/aruco_registry",
+    "telemetry/robot_pose",
+]
+
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -142,6 +150,10 @@ class VizComponent(Component):
             target=self._health_loop, name="LucidVizHealth", daemon=True,
         )
         self._health_thread.start()
+        mqtt = self.context.mqtt
+        if hasattr(mqtt, "subscribe"):
+            for suffix in _ARENA_TELEMETRY_SUFFIXES:
+                mqtt.subscribe(self.context.topic(suffix), self._on_arena_message)
         self._log.info("Started viz component")
 
     def _stop(self) -> None:
@@ -150,6 +162,10 @@ class VizComponent(Component):
         if t:
             t.join(timeout=3.0)
             self._health_thread = None
+        mqtt = self.context.mqtt
+        if hasattr(mqtt, "unsubscribe"):
+            for suffix in _ARENA_TELEMETRY_SUFFIXES:
+                mqtt.unsubscribe(self.context.topic(suffix))
         self._stop_arena()
         self._stop_touchdesigner()
         self._log.info("Stopped viz component")
@@ -170,18 +186,13 @@ class VizComponent(Component):
         try:
             arena_path = _arena_script_path()
             env = dict(os.environ)
-            env.update({
-                "MQTT_HOST": os.getenv("MQTT_HOST", "localhost"),
-                "MQTT_PORT": os.getenv("MQTT_PORT", "1883"),
-                "AGENT_USERNAME": os.getenv("AGENT_USERNAME", ""),
-                "AGENT_PASSWORD": os.getenv("AGENT_PASSWORD", ""),
-            })
             log_dir = os.path.join(os.getenv("LUCID_AGENT_BASE_DIR", "."), "logs")
             os.makedirs(log_dir, exist_ok=True)
             arena_log = open(os.path.join(log_dir, "arena.log"), "a")
             self._arena_proc = subprocess.Popen(
                 [sys.executable, arena_path],
                 env=env,
+                stdin=subprocess.PIPE,
                 stdout=arena_log,
                 stderr=arena_log,
             )
@@ -191,12 +202,29 @@ class VizComponent(Component):
             self._log.exception("Failed to start arena.py")
             return False
 
+    def _on_arena_message(self, topic: str, payload_str: str) -> None:
+        """Forward an MQTT message to the arena subprocess via stdin."""
+        proc = self._arena_proc
+        if proc is None or proc.poll() is not None or proc.stdin is None:
+            return
+        try:
+            line = json.dumps({"topic": topic, "payload": json.loads(payload_str)}) + "\n"
+            proc.stdin.write(line.encode())
+            proc.stdin.flush()
+        except Exception:
+            pass
+
     def _stop_arena(self) -> bool:
         proc = self._arena_proc
         if proc is None or proc.poll() is not None:
             self._arena_proc = None
             return True
         try:
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
             proc.terminate()
             try:
                 proc.wait(timeout=5.0)

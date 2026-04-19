@@ -1,6 +1,9 @@
 """
 Arena Projection Overlay - Interactive Calibration + Foraging Visualization
 
+Data is received from the VizComponent via stdin (JSON lines).
+Each line: {"topic": "<full topic>", "payload": {...}}
+
 Controls:
   - Click and drag the arena to move it
   - Scroll wheel to resize the arena
@@ -10,16 +13,6 @@ Controls:
   - F: Toggle fullscreen
   - I: Toggle info overlay
   - ESC: Quit
-
-MQTT subscriptions:
-  - lucid/agents/+/components/ros_bridge/telemetry/aruco_confirmed
-    Single ArUco confirmation → assigns to nearest free corner
-  - lucid/agents/+/components/ros_bridge/telemetry/puck_registry
-    Full puck list → colored dots on arena
-  - lucid/agents/+/components/ros_bridge/telemetry/aruco_registry
-    Full corner list → corners turn to marker color
-  - lucid/agents/+/components/ros_bridge/telemetry/natnet_uhm4_pose
-    Robot pose from OptiTrack → triangle on arena
 """
 
 import pygame
@@ -28,12 +21,6 @@ import os
 import json
 import math
 import threading
-
-try:
-    import paho.mqtt.client as mqtt
-    HAS_MQTT = True
-except ImportError:
-    HAS_MQTT = False
 
 # ── Display ──────────────────────────────────────────────────────────────────
 WINDOW_WIDTH = 1920
@@ -69,17 +56,6 @@ COLOR_MAP = {
 PUCK_DRAW_RADIUS = 8
 ROBOT_SIZE = 15
 ROBOT_COLOR = (255, 255, 0)
-
-# ── MQTT (configurable via env vars) ─────────────────────────────────────────
-MQTT_BROKER = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USERNAME = os.getenv("AGENT_USERNAME", "")
-MQTT_PASSWORD = os.getenv("AGENT_PASSWORD", "")
-
-CORNER_TOPIC = "lucid/agents/+/components/viz/telemetry/aruco_confirmed"
-PUCK_REGISTRY_TOPIC = "lucid/agents/+/components/viz/telemetry/puck_registry"
-ARUCO_REGISTRY_TOPIC = "lucid/agents/+/components/viz/telemetry/aruco_registry"
-ROBOT_POSE_TOPIC = "lucid/agents/+/components/viz/telemetry/robot_pose"
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
@@ -151,14 +127,14 @@ def assign_corner(marker_id, x, y):
                 return
 
 
-# ── MQTT message handlers ────────────────────────────────────────────────────
+# ── Message handlers ─────────────────────────────────────────────────────────
 def _handle_aruco_confirmed(payload):
     marker_id = payload.get("marker_id")
     x = payload.get("x")
     y = payload.get("y")
     if marker_id is not None and x is not None and y is not None:
         assign_corner(int(marker_id), float(x), float(y))
-        print(f"[MQTT] Corner marker {marker_id} at ({x:.3f}, {y:.3f})")
+        print(f"[arena] Corner marker {marker_id} at ({x:.3f}, {y:.3f})")
 
 
 def _handle_puck_registry(payload):
@@ -187,55 +163,43 @@ def _handle_robot_pose(payload):
             robot_pose["orientation"] = ori
 
 
-# ── MQTT callbacks ───────────────────────────────────────────────────────────
-def on_connect(client, userdata, flags, reason_code, properties=None):
-    print(f"[MQTT] Connected (rc={reason_code}), subscribing to topics")
-    client.subscribe(CORNER_TOPIC, qos=0)
-    client.subscribe(PUCK_REGISTRY_TOPIC, qos=0)
-    client.subscribe(ARUCO_REGISTRY_TOPIC, qos=0)
-    client.subscribe(ROBOT_POSE_TOPIC, qos=0)
+# ── Stdin reader ─────────────────────────────────────────────────────────────
+def start_stdin_reader():
+    """Read JSON lines from stdin and dispatch to state handlers.
 
+    Each line written by VizComponent: {"topic": "<topic>", "payload": {...}}
+    Runs in a daemon thread so it exits when the main process exits.
+    """
+    def _read():
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+                topic = msg.get("topic", "")
+                payload = msg.get("payload", {})
+                if topic.endswith("/telemetry/aruco_confirmed"):
+                    _handle_aruco_confirmed(payload)
+                elif topic.endswith("/telemetry/puck_registry"):
+                    _handle_puck_registry(payload)
+                elif topic.endswith("/telemetry/aruco_registry"):
+                    _handle_aruco_registry(payload)
+                elif topic.endswith("/telemetry/robot_pose"):
+                    _handle_robot_pose(payload)
+            except Exception as e:
+                print(f"[arena] Bad stdin message: {e}")
 
-def on_message(client, userdata, msg):
-    try:
-        payload = json.loads(msg.payload)
-    except (json.JSONDecodeError, TypeError) as e:
-        print(f"[MQTT] Bad payload: {e}")
-        return
-
-    topic = msg.topic
-    if topic.endswith("/telemetry/aruco_confirmed"):
-        _handle_aruco_confirmed(payload)
-    elif topic.endswith("/telemetry/puck_registry"):
-        _handle_puck_registry(payload)
-    elif topic.endswith("/telemetry/aruco_registry"):
-        _handle_aruco_registry(payload)
-    elif topic.endswith("/telemetry/robot_pose"):
-        _handle_robot_pose(payload)
-
-
-def start_mqtt():
-    """Start MQTT client in a background thread."""
-    if not HAS_MQTT:
-        print("[MQTT] paho-mqtt not installed — no live data")
-        return None
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="arena-overlay")
-    client.on_connect = on_connect
-    client.on_message = on_message
-    if MQTT_USERNAME:
-        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-    try:
-        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-    except Exception as e:
-        print(f"[MQTT] Could not connect to {MQTT_BROKER}:{MQTT_PORT} — {e}")
-        return None
-    client.loop_start()
-    return client
+    t = threading.Thread(target=_read, name="StdinReader", daemon=True)
+    t.start()
+    return t
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     global arena_w, arena_h, arena_x, arena_y
+
+    start_stdin_reader()
 
     pygame.init()
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.FULLSCREEN)
@@ -243,8 +207,6 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("monospace", 16)
     corner_font = pygame.font.SysFont("monospace", CORNER_FONT_SIZE, bold=True)
-
-    mqtt_client = start_mqtt()
 
     dragging = False
     drag_offset_x = 0
@@ -438,9 +400,6 @@ def main():
         pygame.display.flip()
         clock.tick(60)
 
-    if mqtt_client:
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
     pygame.quit()
     sys.exit()
 

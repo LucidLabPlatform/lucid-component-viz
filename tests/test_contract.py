@@ -25,6 +25,12 @@ class RecordingMqtt:
         info.rc = 0
         return info
 
+    def subscribe(self, topic: str, callback: Any, *, qos: int = 0) -> None:
+        pass
+
+    def unsubscribe(self, topic: str) -> None:
+        pass
+
     def topics(self) -> list[str]:
         return [m["topic"] for m in self.messages]
 
@@ -61,17 +67,17 @@ def test_component_id(component):
 
 def test_capabilities(component):
     caps = component.capabilities()
-    assert "start_arena" in caps
-    assert "stop_arena" in caps
-    assert "start_touchdesigner" in caps
-    assert "stop_touchdesigner" in caps
+    assert "start-arena" in caps
+    assert "stop-arena" in caps
+    assert "start-touchdesigner" in caps
+    assert "stop-touchdesigner" in caps
     assert "restart" in caps
 
 
 def test_metadata_includes_capabilities(component):
     meta = component.metadata()
     assert "capabilities" in meta
-    assert "start_arena" in meta["capabilities"]
+    assert "start-arena" in meta["capabilities"]
 
 
 # ── State tests ──────────────────────────────────────────────────────────────
@@ -161,9 +167,9 @@ def test_cmd_stop_arena_when_not_running(mock_pgrep, component, mqtt):
 
 
 @patch("lucid_component_viz.component._find_pid", return_value=None)
-@patch("lucid_component_viz.component.subprocess.Popen")
-def test_cmd_start_touchdesigner(mock_popen, mock_pgrep, component, mqtt):
-    mock_popen.return_value = MagicMock()
+@patch("lucid_component_viz.component.subprocess.run")
+def test_cmd_start_touchdesigner(mock_run, mock_pgrep, component, mqtt):
+    mock_run.return_value = MagicMock(returncode=0)
 
     payload = json.dumps({"request_id": "r3"})
     component.on_cmd_start_touchdesigner(payload)
