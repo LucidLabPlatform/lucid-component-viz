@@ -49,13 +49,22 @@ FINE_STEP = 1
 
 # Puck/marker color mapping: 1=red, 2=green, 3=blue
 COLOR_MAP = {
-    1: (255, 50, 50),
-    2: (50, 255, 50),
-    3: (50, 100, 255),
+    1: (255, 0, 0),
+    2: (0, 255, 0),
+    3: (0, 0, 255),
 }
 PUCK_DRAW_RADIUS = 8
 ROBOT_SIZE = 15
-ROBOT_COLOR = (255, 255, 0)
+ROBOT_COLOR_OPTITRACK = (255, 255, 0)   # yellow
+ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
+
+# ── Coordinate frame calibration ─────────────────────────────────────────────
+# OptiTrack world-frame position of the arena's bottom-left corner (robot start / "?" corner)
+OPTITRACK_ORIGIN_X =  2.987614393234253
+OPTITRACK_ORIGIN_Y =  1.837099552154541
+# Robot heading in arena frame when odom was last reset (= goal_yaw from reset-to-start)
+# This is the angle odom's X-axis makes with arena's X-axis.
+ODOM_YAW_OFFSET    = -2.3711036734611257
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
@@ -71,7 +80,8 @@ pucks = []
 pucks_lock = threading.Lock()
 
 # ── Robot pose state ─────────────────────────────────────────────────────────
-robot_pose = {"position": None, "orientation": None}
+robot_pose_optitrack = {"position": None, "orientation": None}
+robot_pose_odom      = {"position": None, "orientation": None}
 robot_lock = threading.Lock()
 
 
@@ -86,11 +96,30 @@ def map_to_screen(mx, my):
     return int(sx), int(sy)
 
 
-def optitrack_to_map(ox, oy, oz):
-    """Convert OptiTrack coordinates to map coordinates.
-    Adjust axes here if robot appears in the wrong place.
-    Default: OptiTrack X → map X, OptiTrack Z → map Y."""
-    return ox, oz
+def optitrack_to_arena(ox, oy):
+    """OptiTrack world frame → arena frame (metres, origin = BL corner).
+    OptiTrack: right=+X, top→bottom=+Y. Arena: right=+X, bottom→top=+Y.
+    So X is a simple translation offset; Y is translated AND flipped."""
+    return ox - OPTITRACK_ORIGIN_X, OPTITRACK_ORIGIN_Y - oy
+
+
+def odom_to_arena(ox, oy):
+    """Odom frame → arena frame.
+    Odom resets to (0,0) at the robot start (= arena BL corner).
+    Odom yaw=0 points in the ODOM_YAW_OFFSET direction in arena frame,
+    so rotate by that angle to align with arena axes."""
+    c = math.cos(ODOM_YAW_OFFSET)
+    s = math.sin(ODOM_YAW_OFFSET)
+    return ox * c - oy * s, ox * s + oy * c
+
+
+def map_to_arena(mx, my):
+    """ROS map frame → arena frame.
+    Map initialises co-incident with odom (same origin, same rotation),
+    so the same transform applies."""
+    c = math.cos(ODOM_YAW_OFFSET)
+    s = math.sin(ODOM_YAW_OFFSET)
+    return mx * c - my * s, mx * s + my * c
 
 
 def quaternion_to_yaw(qx, qy, qz, qw):
@@ -133,8 +162,9 @@ def _handle_aruco_confirmed(payload):
     x = payload.get("x")
     y = payload.get("y")
     if marker_id is not None and x is not None and y is not None:
-        assign_corner(int(marker_id), float(x), float(y))
-        print(f"[arena] Corner marker {marker_id} at ({x:.3f}, {y:.3f})")
+        ax, ay = map_to_arena(float(x), float(y))
+        assign_corner(int(marker_id), ax, ay)
+        print(f"[arena] Corner marker {marker_id} at map ({x:.3f}, {y:.3f}) → arena ({ax:.3f}, {ay:.3f})")
 
 
 def _handle_puck_registry(payload):
@@ -145,22 +175,26 @@ def _handle_puck_registry(payload):
         pucks.extend(puck_list)
 
 
-def _handle_aruco_registry(payload):
-    value = payload.get("value", payload)
-    marker_list = value.get("markers", [])
-    for m in marker_list:
-        assign_corner(int(m["marker_id"]), float(m["x"]), float(m["y"]))
-
-
-def _handle_robot_pose(payload):
+def _handle_robot_pose_optitrack(payload):
     value = payload.get("value", payload)
     pose = value.get("pose", {})
     pos = pose.get("position")
     ori = pose.get("orientation")
     if pos and ori:
         with robot_lock:
-            robot_pose["position"] = pos
-            robot_pose["orientation"] = ori
+            robot_pose_optitrack["position"] = pos
+            robot_pose_optitrack["orientation"] = ori
+
+
+def _handle_robot_pose_odom(payload):
+    value = payload.get("value", payload)
+    pose = value.get("pose", {})
+    pos = pose.get("position")
+    ori = pose.get("orientation")
+    if pos and ori:
+        with robot_lock:
+            robot_pose_odom["position"] = pos
+            robot_pose_odom["orientation"] = ori
 
 
 # ── Stdin reader ─────────────────────────────────────────────────────────────
@@ -183,10 +217,10 @@ def start_stdin_reader():
                     _handle_aruco_confirmed(payload)
                 elif topic.endswith("/telemetry/puck_registry"):
                     _handle_puck_registry(payload)
-                elif topic.endswith("/telemetry/aruco_registry"):
-                    _handle_aruco_registry(payload)
-                elif topic.endswith("/telemetry/robot_pose"):
-                    _handle_robot_pose(payload)
+                elif topic.endswith("/telemetry/robot_pose_optitrack"):
+                    _handle_robot_pose_optitrack(payload)
+                elif topic.endswith("/telemetry/robot_pose_odom"):
+                    _handle_robot_pose_odom(payload)
             except Exception as e:
                 print(f"[arena] Bad stdin message: {e}")
 
@@ -240,13 +274,22 @@ def main():
                             else:
                                 print(f"  Corner {c['label']}: ?")
                     with robot_lock:
-                        if robot_pose["position"]:
-                            p = robot_pose["position"]
-                            o = robot_pose["orientation"]
-                            print(f"  Robot pos: ({p['x']:.3f}, {p['y']:.3f}, {p['z']:.3f})")
-                            print(f"  Robot ori: ({o['x']:.3f}, {o['y']:.3f}, {o['z']:.3f}, {o['w']:.3f})")
+                        if robot_pose_optitrack["position"]:
+                            p = robot_pose_optitrack["position"]
+                            o = robot_pose_optitrack["orientation"]
+                            ax, ay = optitrack_to_arena(p["x"], p["y"])
+                            print(f"  Robot (OptiTrack) raw: ({p['x']:.3f}, {p['y']:.3f}) → arena ({ax:.3f}, {ay:.3f})")
+                            print(f"  Robot (OptiTrack) ori: ({o['x']:.3f}, {o['y']:.3f}, {o['z']:.3f}, {o['w']:.3f})")
                         else:
-                            print(f"  Robot: no data")
+                            print(f"  Robot (OptiTrack): no data")
+                        if robot_pose_odom["position"]:
+                            p = robot_pose_odom["position"]
+                            o = robot_pose_odom["orientation"]
+                            ax, ay = odom_to_arena(p["x"], p["y"])
+                            print(f"  Robot (Odom) raw: ({p['x']:.3f}, {p['y']:.3f}) → arena ({ax:.3f}, {ay:.3f})")
+                            print(f"  Robot (Odom) ori: ({o['x']:.3f}, {o['y']:.3f}, {o['z']:.3f}, {o['w']:.3f})")
+                        else:
+                            print(f"  Robot (Odom): no data")
                     with pucks_lock:
                         print(f"  Pucks: {len(pucks)} total")
                         for pk in pucks:
@@ -359,24 +402,37 @@ def main():
         with pucks_lock:
             for p in pucks:
                 color = COLOR_MAP.get(p.get("color"), (200, 200, 200))
-                sx, sy = map_to_screen(p.get("x", 0), p.get("y", 0))
+                ax, ay = map_to_arena(p.get("x", 0), p.get("y", 0))
+                sx, sy = map_to_screen(ax, ay)
                 pygame.draw.circle(screen, color, (sx, sy), PUCK_DRAW_RADIUS)
                 if p.get("status") == 1:  # placed at home
                     pygame.draw.circle(screen, (255, 255, 255), (sx, sy), PUCK_DRAW_RADIUS + 3, 2)
 
         # ── Robot ────────────────────────────────────────────────────────────
         with robot_lock:
-            pos = robot_pose["position"]
-            ori = robot_pose["orientation"]
-        if pos is not None and ori is not None:
-            mx, my = optitrack_to_map(pos["x"], pos["y"], pos["z"])
-            sx, sy = map_to_screen(mx, my)
+            ot_pos = robot_pose_optitrack["position"]
+            ot_ori = robot_pose_optitrack["orientation"]
+            od_pos = robot_pose_odom["position"]
+            od_ori = robot_pose_odom["orientation"]
+
+        def draw_robot(ax, ay, ori, color, yaw_offset=0.0, negate_yaw=False):
+            sx, sy = map_to_screen(ax, ay)
             yaw = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
+            if negate_yaw:
+                yaw = -yaw
+            yaw += yaw_offset
             s = ROBOT_SIZE
-            tip = (sx + int(s * math.cos(yaw)), sy - int(s * math.sin(yaw)))
-            left = (sx + int(s * 0.6 * math.cos(yaw + 2.5)), sy - int(s * 0.6 * math.sin(yaw + 2.5)))
+            tip   = (sx + int(s * math.cos(yaw)),             sy - int(s * math.sin(yaw)))
+            left  = (sx + int(s * 0.6 * math.cos(yaw + 2.5)), sy - int(s * 0.6 * math.sin(yaw + 2.5)))
             right = (sx + int(s * 0.6 * math.cos(yaw - 2.5)), sy - int(s * 0.6 * math.sin(yaw - 2.5)))
-            pygame.draw.polygon(screen, ROBOT_COLOR, [tip, left, right])
+            pygame.draw.polygon(screen, color, [tip, left, right])
+
+        if ot_pos and ot_ori:
+            ax, ay = optitrack_to_arena(ot_pos["x"], ot_pos["y"])
+            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=0.0, negate_yaw=True)
+        if od_pos and od_ori:
+            ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
+            draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_YAW_OFFSET)
 
         # ── Info overlay ─────────────────────────────────────────────────────
         if show_info:
@@ -386,10 +442,11 @@ def main():
                 puck_count = len(pucks)
                 placed_count = sum(1 for p in pucks if p.get("status") == 1)
             with robot_lock:
-                robot_str = "connected" if robot_pose["position"] else "no data"
+                ot_str = "ok" if robot_pose_optitrack["position"] else "--"
+                od_str = "ok" if robot_pose_odom["position"] else "--"
             lines = [
                 f"Origin: ({arena_x}, {arena_y})  Size: {arena_w}x{arena_h}  Corners: {known_count}/4",
-                f"Pucks: {puck_count} ({placed_count} placed)  Robot: {robot_str}",
+                f"Pucks: {puck_count} ({placed_count} placed)  OptiTrack: {ot_str}  Odom: {od_str}",
                 f"Drag to move | Scroll to resize | Arrows: fine move | Shift+Arrows: fine size",
                 f"P: print | F: fullscreen | I: toggle info | ESC: quit",
             ]
