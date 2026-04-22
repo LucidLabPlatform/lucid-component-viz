@@ -29,7 +29,7 @@ WINDOW_HEIGHT = 1080
 # ── Calibrated arena (534px = 2.1m x 2.1m) ─────────────────────────────────
 arena_w = 534
 arena_h = 534
-arena_x = 570
+arena_x = 595
 arena_y = 0
 
 ARENA_METERS_W = 2.1
@@ -65,6 +65,9 @@ OPTITRACK_ORIGIN_Y =  1.837099552154541
 # Robot heading in arena frame when odom was last reset (= goal_yaw from reset-to-start)
 # This is the angle odom's X-axis makes with arena's X-axis.
 ODOM_YAW_OFFSET    = -2.3711036734611257
+# Robot start position in arena frame (metres from BL corner) — odom/map (0,0) maps here.
+ODOM_ORIGIN_X      = 0.20   # 20 cm from left wall
+ODOM_ORIGIN_Y      = 0.30   # 30 cm from bottom wall
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
@@ -105,12 +108,12 @@ def optitrack_to_arena(ox, oy):
 
 def odom_to_arena(ox, oy):
     """Odom frame → arena frame.
-    Odom resets to (0,0) at the robot start (= arena BL corner).
+    Odom (0,0) is at ODOM_ORIGIN (20 cm from left, 30 cm from bottom wall).
     Odom yaw=0 points in the ODOM_YAW_OFFSET direction in arena frame,
-    so rotate by that angle to align with arena axes."""
+    so rotate by that angle then translate to the start position."""
     c = math.cos(ODOM_YAW_OFFSET)
     s = math.sin(ODOM_YAW_OFFSET)
-    return ox * c - oy * s, ox * s + oy * c
+    return ox * c - oy * s + ODOM_ORIGIN_X, ox * s + oy * c + ODOM_ORIGIN_Y
 
 
 def map_to_arena(mx, my):
@@ -119,7 +122,7 @@ def map_to_arena(mx, my):
     so the same transform applies."""
     c = math.cos(ODOM_YAW_OFFSET)
     s = math.sin(ODOM_YAW_OFFSET)
-    return mx * c - my * s, mx * s + my * c
+    return mx * c - my * s + ODOM_ORIGIN_X, mx * s + my * c + ODOM_ORIGIN_Y
 
 
 def quaternion_to_yaw(qx, qy, qz, qw):
@@ -364,6 +367,17 @@ def main():
         arena_rect = pygame.Rect(arena_x, arena_y, arena_w, arena_h)
         pygame.draw.rect(screen, BORDER_COLOR, arena_rect)
         pygame.draw.rect(screen, (255, 0, 0), arena_rect, BORDER_THICKNESS)
+
+        # ── Arena origin TF axes ─────────────────────────────────────────────
+        # Draw +X (red, right) and +Y (green, up) axes at arena (0,0) = BL corner
+        _tf_len = 40  # pixels
+        _ox, _oy = map_to_screen(0, 0)
+        pygame.draw.line(screen, (255, 50, 50),  (_ox, _oy), (_ox + _tf_len, _oy), 2)  # +X right
+        pygame.draw.line(screen, (50, 255, 50),  (_ox, _oy), (_ox, _oy - _tf_len), 2)  # +Y up
+        _tf_font = pygame.font.SysFont("monospace", 11)
+        screen.blit(_tf_font.render("+X", True, (255, 50, 50)),  (_ox + _tf_len + 2, _oy - 8))
+        screen.blit(_tf_font.render("+Y", True, (50, 255, 50)),  (_ox + 2, _oy - _tf_len - 12))
+        screen.blit(_tf_font.render("0", True, (180, 180, 180)), (_ox + 3, _oy + 3))
 
         # ── Corner markers ───────────────────────────────────────────────────
         positions = corner_screen_positions()
