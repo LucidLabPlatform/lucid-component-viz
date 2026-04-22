@@ -26,14 +26,14 @@ import threading
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# ── Calibrated arena (764px = 3m, 534px = 2m) ───────────────────────────────
-arena_w = 764
+# ── Calibrated arena (534px = 2.1m x 2.1m) ─────────────────────────────────
+arena_w = 534
 arena_h = 534
 arena_x = 570
 arena_y = 0
 
-ARENA_METERS_W = 3.0
-ARENA_METERS_H = 2.0
+ARENA_METERS_W = 2.1
+ARENA_METERS_H = 2.1
 
 # ── Visual ───────────────────────────────────────────────────────────────────
 BORDER_THICKNESS = 4
