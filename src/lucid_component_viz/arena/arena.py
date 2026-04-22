@@ -101,9 +101,9 @@ def map_to_screen(mx, my):
 
 def optitrack_to_arena(ox, oy):
     """OptiTrack world frame → arena frame (metres, origin = BL corner).
-    OptiTrack: right=+X, top→bottom=+Y. Arena: right=+X, bottom→top=+Y.
-    So X is a simple translation offset; Y is translated AND flipped."""
-    return ox - OPTITRACK_ORIGIN_X, OPTITRACK_ORIGIN_Y - oy
+    OptiTrack: left=+X, top→bottom=+Y. Arena: right=+X, bottom→top=+Y.
+    Both axes are flipped: X negated, Y negated."""
+    return OPTITRACK_ORIGIN_X - ox, OPTITRACK_ORIGIN_Y - oy
 
 
 def odom_to_arena(ox, oy):
