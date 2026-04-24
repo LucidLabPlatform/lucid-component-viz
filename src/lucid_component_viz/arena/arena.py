@@ -216,13 +216,13 @@ def start_stdin_reader():
                 msg = json.loads(raw)
                 topic = msg.get("topic", "")
                 payload = msg.get("payload", {})
-                if topic.endswith("/telemetry/aruco_confirmed"):
+                if topic.endswith("/aruco_confirmed"):
                     _handle_aruco_confirmed(payload)
-                elif topic.endswith("/telemetry/puck_registry"):
+                elif topic.endswith("/puck_registry"):
                     _handle_puck_registry(payload)
-                elif topic.endswith("/telemetry/robot_pose_optitrack"):
+                elif topic.endswith("/robot_pose_optitrack"):
                     _handle_robot_pose_optitrack(payload)
-                elif topic.endswith("/telemetry/robot_pose_odom"):
+                elif topic.endswith("/robot_pose_odom"):
                     _handle_robot_pose_odom(payload)
             except Exception as e:
                 print(f"[arena] Bad stdin message: {e}")

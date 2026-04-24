@@ -19,12 +19,13 @@ from typing import Any, Optional
 
 from lucid_component_base import Component, ComponentContext
 
-# Telemetry topic suffixes the arena overlay consumes from this agent's viz component.
-_ARENA_TELEMETRY_SUFFIXES = [
-    "telemetry/aruco_confirmed",
-    "telemetry/puck_registry",
-    "telemetry/aruco_registry",
-    "telemetry/robot_pose",
+# Arena data commands — topic links forward data to these cmd/ topics
+# instead of telemetry/ so agents don't need subscribe ACL on their own telemetry.
+_ARENA_DATA_COMMANDS = [
+    "aruco_confirmed",
+    "puck_registry",
+    "aruco_registry",
+    "robot_pose",
 ]
 
 
@@ -85,7 +86,18 @@ class VizComponent(Component):
             "start-arena", "stop-arena",
             "start-touchdesigner", "stop-touchdesigner",
             "restart",
-        ]
+        ] + _ARENA_DATA_COMMANDS
+
+    def __getattr__(self, name: str) -> Any:
+        """Route on_cmd_<data_command> calls to the arena subprocess."""
+        if name.startswith("on_cmd_"):
+            command = name[7:]  # strip "on_cmd_"
+            if command in _ARENA_DATA_COMMANDS:
+                def _handler(payload_str: str) -> None:
+                    topic = self.context.topic("cmd/" + command)
+                    self._on_arena_message(topic, payload_str)
+                return _handler
+        raise AttributeError(f"{type(self).__name__!r} has no attribute {name!r}")
 
     def metadata(self) -> dict[str, Any]:
         out = super().metadata()
@@ -150,8 +162,6 @@ class VizComponent(Component):
             target=self._health_loop, name="LucidVizHealth", daemon=True,
         )
         self._health_thread.start()
-        for suffix in _ARENA_TELEMETRY_SUFFIXES:
-            self.subscribe(self.context.topic(suffix), self._on_arena_message)
         self._log.info("Started viz component")
 
     def _stop(self) -> None:
@@ -160,8 +170,6 @@ class VizComponent(Component):
         if t:
             t.join(timeout=3.0)
             self._health_thread = None
-        for suffix in _ARENA_TELEMETRY_SUFFIXES:
-            self.unsubscribe(self.context.topic(suffix))
         self._stop_arena()
         self._stop_touchdesigner()
         self._log.info("Stopped viz component")
