@@ -81,6 +81,10 @@ corners_lock = threading.Lock()
 # ── Puck state ───────────────────────────────────────────────────────────────
 pucks = []
 pucks_lock = threading.Lock()
+seen_puck_ids: set[int] = set()
+
+# ── ArUco state ──────────────────────────────────────────────────────────────
+seen_marker_ids: set[int] = set()
 
 # ── Robot pose state ─────────────────────────────────────────────────────────
 robot_pose_optitrack = {"position": None, "orientation": None}
@@ -160,22 +164,52 @@ def assign_corner(marker_id, x, y):
 
 
 # ── Message handlers ─────────────────────────────────────────────────────────
-def _handle_aruco_confirmed(payload):
-    marker_id = payload.get("marker_id")
-    x = payload.get("x")
-    y = payload.get("y")
-    if marker_id is not None and x is not None and y is not None:
+def _handle_aruco_registry(payload):
+    """ArucoRegistry: markers[] of {id, marker_id, status, x, y, z}.
+
+    Calls assign_corner for every marker (idempotent — known marker_ids just
+    update position). Logs only the first time we see each marker_id.
+    """
+    value = payload.get("value", payload)
+    markers = value.get("markers", []) or []
+    for m in markers:
+        marker_id = m.get("marker_id")
+        x = m.get("x")
+        y = m.get("y")
+        if marker_id is None or x is None or y is None:
+            continue
         ax, ay = map_to_arena(float(x), float(y))
-        assign_corner(int(marker_id), ax, ay)
-        print(f"[arena] Corner marker {marker_id} at map ({x:.3f}, {y:.3f}) → arena ({ax:.3f}, {ay:.3f})")
+        mid = int(marker_id)
+        assign_corner(mid, ax, ay)
+        if mid not in seen_marker_ids:
+            seen_marker_ids.add(mid)
+            print(f"[arena] NEW corner marker {mid} at map ({x:.3f}, {y:.3f}) → arena ({ax:.3f}, {ay:.3f})")
 
 
 def _handle_puck_registry(payload):
+    """PuckRegistry: pucks[] of {id, color, status, x, y, z}.
+
+    Replaces puck list wholesale; logs only newly-seen puck ids.
+    """
     value = payload.get("value", payload)
-    puck_list = value.get("pucks", [])
+    puck_list = value.get("pucks", []) or []
+    new_ids = []
+    for p in puck_list:
+        pid = p.get("id")
+        if pid is None:
+            continue
+        pid = int(pid)
+        if pid not in seen_puck_ids:
+            seen_puck_ids.add(pid)
+            new_ids.append((pid, p.get("color"), p.get("x"), p.get("y")))
     with pucks_lock:
         pucks.clear()
         pucks.extend(puck_list)
+    for pid, color, px, py in new_ids:
+        try:
+            print(f"[arena] NEW puck id={pid} color={color} at ({float(px):.3f}, {float(py):.3f})")
+        except (TypeError, ValueError):
+            print(f"[arena] NEW puck id={pid} color={color}")
 
 
 def _handle_robot_pose_optitrack(payload):
@@ -216,8 +250,8 @@ def start_stdin_reader():
                 msg = json.loads(raw)
                 topic = msg.get("topic", "")
                 payload = msg.get("payload", {})
-                if topic.endswith("/aruco_confirmed"):
-                    _handle_aruco_confirmed(payload)
+                if topic.endswith("/aruco_registry"):
+                    _handle_aruco_registry(payload)
                 elif topic.endswith("/puck_registry"):
                     _handle_puck_registry(payload)
                 elif topic.endswith("/robot_pose_optitrack"):

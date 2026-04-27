@@ -22,7 +22,6 @@ from lucid_component_base import Component, ComponentContext
 # Arena data commands — topic links forward data to these cmd/ topics
 # instead of telemetry/ so agents don't need subscribe ACL on their own telemetry.
 _ARENA_DATA_COMMANDS = [
-    "aruco_confirmed",
     "puck_registry",
     "aruco_registry",
     "robot_pose_optitrack",
