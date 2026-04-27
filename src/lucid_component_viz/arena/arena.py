@@ -59,15 +59,19 @@ ROBOT_COLOR_OPTITRACK = (255, 255, 0)   # yellow
 ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
 
 # ── Coordinate frame calibration ─────────────────────────────────────────────
-# OptiTrack world-frame position of the arena's bottom-left corner (robot start / "?" corner)
-OPTITRACK_ORIGIN_X =  2.987614393234253
-OPTITRACK_ORIGIN_Y =  1.837099552154541
-# Robot heading in arena frame when odom was last reset (= goal_yaw from reset-to-start)
-# This is the angle odom's X-axis makes with arena's X-axis.
-ODOM_YAW_OFFSET    = -2.3711036734611257
-# Robot start position in arena frame (metres from BL corner) — odom/map (0,0) maps here.
-ODOM_ORIGIN_X      = 0.20   # 20 cm from left wall
-ODOM_ORIGIN_Y      = 0.30   # 30 cm from bottom wall
+# Arena (0,0) is defined as the robot start pose, coincident with odom/map (0,0).
+# The drawn arena rectangle's BL corner sits at arena (BL_X, BL_Y) — i.e. the robot
+# starts 0.20 m right of the left wall and 0.30 m above the bottom wall.
+BL_X = -0.20
+BL_Y = -0.30
+
+# OptiTrack world-frame position of arena (0,0) (= robot start)
+OPTITRACK_ORIGIN_X = 2.787614393234253
+OPTITRACK_ORIGIN_Y = 1.537099552154541
+
+# Angle odom's +X axis makes with arena's +X axis at odom reset.
+# Robot faces TR corner at start.
+ODOM_YAW_OFFSET = 0.7704890201286675
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
@@ -94,39 +98,35 @@ robot_lock = threading.Lock()
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
 def map_to_screen(mx, my):
-    """Convert map coordinates (meters) to screen pixels.
-    Map origin (0,0) = bottom-left of arena."""
+    """Convert arena coordinates (meters) to screen pixels.
+    Arena (0,0) = robot start; the drawn rectangle's BL corner sits at arena (BL_X, BL_Y)."""
     px_per_m_x = arena_w / ARENA_METERS_W
     px_per_m_y = arena_h / ARENA_METERS_H
-    sx = arena_x + mx * px_per_m_x
-    sy = arena_y + arena_h - my * px_per_m_y  # Y inverted for pygame
+    sx = arena_x + (mx - BL_X) * px_per_m_x
+    sy = arena_y + arena_h - (my - BL_Y) * px_per_m_y  # Y inverted for pygame
     return int(sx), int(sy)
 
 
 def optitrack_to_arena(ox, oy):
-    """OptiTrack world frame → arena frame (metres, origin = BL corner).
+    """OptiTrack world frame → arena frame (metres, origin = robot start).
     OptiTrack: left=+X, top→bottom=+Y. Arena: right=+X, bottom→top=+Y.
     Both axes are flipped: X negated, Y negated."""
     return OPTITRACK_ORIGIN_X - ox, OPTITRACK_ORIGIN_Y - oy
 
 
 def odom_to_arena(ox, oy):
-    """Odom frame → arena frame.
-    Odom (0,0) is at ODOM_ORIGIN (20 cm from left, 30 cm from bottom wall).
-    Odom yaw=0 points in the ODOM_YAW_OFFSET direction in arena frame,
-    so rotate by that angle then translate to the start position."""
+    """Odom frame → arena frame. Origins coincide (both at robot start), so pure rotation.
+    Odom yaw=0 points in the ODOM_YAW_OFFSET direction in arena frame."""
     c = math.cos(ODOM_YAW_OFFSET)
     s = math.sin(ODOM_YAW_OFFSET)
-    return ox * c - oy * s + ODOM_ORIGIN_X, ox * s + oy * c + ODOM_ORIGIN_Y
+    return ox * c - oy * s, ox * s + oy * c
 
 
 def map_to_arena(mx, my):
-    """ROS map frame → arena frame.
-    Map initialises co-incident with odom (same origin, same rotation),
-    so the same transform applies."""
+    """ROS map frame → arena frame. Map shares origin/rotation with odom, so same transform."""
     c = math.cos(ODOM_YAW_OFFSET)
     s = math.sin(ODOM_YAW_OFFSET)
-    return mx * c - my * s + ODOM_ORIGIN_X, mx * s + my * c + ODOM_ORIGIN_Y
+    return mx * c - my * s, mx * s + my * c
 
 
 def quaternion_to_yaw(qx, qy, qz, qw):
@@ -146,21 +146,38 @@ def corner_screen_positions():
     ]
 
 
+def corner_slot_for(x, y):
+    """Slot index (0=TL, 1=TR, 2=BR, 3=BL) by quadrant relative to arena centre."""
+    cx = BL_X + ARENA_METERS_W / 2
+    cy = BL_Y + ARENA_METERS_H / 2
+    right = x >= cx
+    top   = y >= cy
+    if top and not right:    return 0
+    if top and right:        return 1
+    if not top and right:    return 2
+    return 3
+
+
 def assign_corner(marker_id, x, y):
-    """Assign an aruco marker to the nearest unoccupied arena corner."""
+    """Place a marker into the corner slot whose quadrant contains (x, y).
+    If the same marker_id is already in another slot, vacate it.
+    If the target slot already holds a different marker, the newer marker wins."""
+    slot = corner_slot_for(x, y)
     with corners_lock:
-        for c in corners:
-            if c["known"] and c["marker_id"] == marker_id:
-                c["real_x"] = x
-                c["real_y"] = y
-                return
-        for c in corners:
-            if not c["known"]:
-                c["known"] = True
-                c["marker_id"] = marker_id
-                c["real_x"] = x
-                c["real_y"] = y
-                return
+        for i, c in enumerate(corners):
+            if c["known"] and c["marker_id"] == marker_id and i != slot:
+                c["known"] = False
+                c["marker_id"] = None
+                c["real_x"] = None
+                c["real_y"] = None
+        c = corners[slot]
+        if c["known"] and c["marker_id"] != marker_id:
+            print(f"[arena] WARN: corner {c['label']} contested between markers "
+                  f"{c['marker_id']} and {marker_id}; keeping newer ({marker_id})")
+        c["known"] = True
+        c["marker_id"] = marker_id
+        c["real_x"] = x
+        c["real_y"] = y
 
 
 # ── Message handlers ─────────────────────────────────────────────────────────
