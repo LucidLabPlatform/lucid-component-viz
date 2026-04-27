@@ -25,7 +25,8 @@ _ARENA_DATA_COMMANDS = [
     "aruco_confirmed",
     "puck_registry",
     "aruco_registry",
-    "robot_pose",
+    "robot_pose_optitrack",
+    "robot_pose_odom",
 ]
 
 
