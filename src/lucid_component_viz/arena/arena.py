@@ -61,13 +61,13 @@ ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
 # ── Coordinate frame calibration ─────────────────────────────────────────────
 # Arena (0,0) is defined as the robot start pose, coincident with odom/map (0,0).
 # The drawn arena rectangle's BL corner sits at arena (BL_X, BL_Y) — i.e. the robot
-# starts 0.20 m right of the left wall and 0.30 m above the bottom wall.
+# starts 0.20 m right of the left wall and 0.22 m above the bottom wall.
 BL_X = -0.20
-BL_Y = -0.30
+BL_Y = -0.22
 
 # OptiTrack world-frame position of arena (0,0) (= robot start)
-OPTITRACK_ORIGIN_X = 2.787614393234253
-OPTITRACK_ORIGIN_Y = 1.537099552154541
+OPTITRACK_ORIGIN_X = 2.587614393234253
+OPTITRACK_ORIGIN_Y = 1.837099552154541
 
 # Angle odom's +X axis makes with arena's +X axis at odom reset.
 # Robot faces TR corner at start.
