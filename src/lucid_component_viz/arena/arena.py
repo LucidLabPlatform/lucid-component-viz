@@ -66,12 +66,12 @@ BL_X = -0.20
 BL_Y = -0.22
 
 # OptiTrack world-frame position of arena (0,0) (= robot start)
-OPTITRACK_ORIGIN_X = 2.587614393234253
-OPTITRACK_ORIGIN_Y = 1.837099552154541
+OPTITRACK_ORIGIN_X = 2.992316246032715
+OPTITRACK_ORIGIN_Y = 1.827694296836853
 
 # Angle odom's +X axis makes with arena's +X axis at odom reset.
 # Robot faces TR corner at start.
-ODOM_YAW_OFFSET = 0.7704890201286675
+ODOM_YAW_OFFSET = 0.7552700000000000
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
