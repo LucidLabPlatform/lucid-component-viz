@@ -26,6 +26,7 @@ _ARENA_DATA_COMMANDS = [
     "aruco_registry",
     "robot_pose_optitrack",
     "robot_pose_odom",
+    "scan",
 ]
 
 
@@ -190,11 +191,13 @@ class VizComponent(Component):
         try:
             arena_path = _arena_script_path()
             env = dict(os.environ)
+            # Force unbuffered stdout/stderr so arena.py prints reach arena.log immediately.
+            env["PYTHONUNBUFFERED"] = "1"
             log_dir = os.path.join(os.getenv("LUCID_AGENT_BASE_DIR", "."), "logs")
             os.makedirs(log_dir, exist_ok=True)
             arena_log = open(os.path.join(log_dir, "arena.log"), "a")
             self._arena_proc = subprocess.Popen(
-                [sys.executable, arena_path],
+                [sys.executable, "-u", arena_path],
                 env=env,
                 stdin=subprocess.PIPE,
                 stdout=arena_log,
@@ -207,16 +210,27 @@ class VizComponent(Component):
             return False
 
     def _on_arena_message(self, topic: str, payload_str: str) -> None:
-        """Forward an MQTT message to the arena subprocess via stdin."""
+        """Forward an MQTT message to the arena subprocess via stdin.
+
+        Drops are logged (not silenced) so we can see when arena is wedged or
+        the pipe is full. Use suffix-only topic in log to keep volume readable.
+        """
         proc = self._arena_proc
         if proc is None or proc.poll() is not None or proc.stdin is None:
             return
         try:
-            line = json.dumps({"topic": topic, "payload": json.loads(payload_str)}) + "\n"
+            payload = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError as e:
+            self._log.warning("arena forward: bad JSON for %s: %s", topic, e)
+            return
+        try:
+            line = json.dumps({"topic": topic, "payload": payload}) + "\n"
             proc.stdin.write(line.encode())
             proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            self._log.warning("arena forward: stdin write failed for %s: %s", topic, e)
         except Exception:
-            pass
+            self._log.exception("arena forward: unexpected error for %s", topic)
 
     def _stop_arena(self) -> bool:
         proc = self._arena_proc

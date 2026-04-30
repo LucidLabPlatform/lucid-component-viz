@@ -12,6 +12,7 @@ Controls:
   - P: Print current calibration + robot/puck state to console
   - F: Toggle fullscreen
   - I: Toggle info overlay
+  - C: Clear the odom path trail
   - ESC: Quit
 """
 
@@ -21,6 +22,7 @@ import os
 import json
 import math
 import threading
+from collections import deque
 
 # ── Display ──────────────────────────────────────────────────────────────────
 WINDOW_WIDTH = 1920
@@ -58,6 +60,17 @@ ROBOT_SIZE = 15
 ROBOT_COLOR_OPTITRACK = (255, 255, 0)   # yellow
 ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
 
+# Lidar scan rendering
+SCAN_POINT_RADIUS = 2
+SCAN_POINT_COLOR = (255, 0, 255)        # magenta
+SCAN_DOWNSAMPLE = 2                     # draw every Nth range (1 = all)
+
+# Odom path trail (breadcrumbs of where the robot has been)
+PATH_COLOR = (0, 120, 180)              # dim cyan, related to odom robot colour
+PATH_THICKNESS = 2
+PATH_MAX_POINTS = 2000                  # ~ several minutes of motion
+PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
+
 # ── Coordinate frame calibration ─────────────────────────────────────────────
 # Arena (0,0) is defined as the robot start pose, coincident with odom/map (0,0).
 # The drawn arena rectangle's BL corner sits at arena (BL_X, BL_Y) — i.e. the robot
@@ -94,6 +107,17 @@ seen_marker_ids: set[int] = set()
 robot_pose_optitrack = {"position": None, "orientation": None}
 robot_pose_odom      = {"position": None, "orientation": None}
 robot_lock = threading.Lock()
+
+# ── Lidar scan state ─────────────────────────────────────────────────────────
+# Stored in arena frame (already transformed at receive time using latest
+# robot_pose_odom). Each entry is (ax, ay) in metres.
+scan_points: list[tuple[float, float]] = []
+scan_lock = threading.Lock()
+
+# ── Odom path state ──────────────────────────────────────────────────────────
+# Trail of robot positions in arena frame, derived from /odom.
+robot_path_odom: deque[tuple[float, float]] = deque(maxlen=PATH_MAX_POINTS)
+path_lock = threading.Lock()
 
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
@@ -206,7 +230,9 @@ def _handle_aruco_registry(payload):
 def _handle_puck_registry(payload):
     """PuckRegistry: pucks[] of {id, color, status, x, y, z}.
 
-    Replaces puck list wholesale; logs only newly-seen puck ids.
+    Replaces puck list wholesale (semantic: registry IS the full list).
+    Logs newly-seen puck ids and any transition to/from empty so we can see
+    when the upstream publisher transiently clears the registry.
     """
     value = payload.get("value", payload)
     puck_list = value.get("pucks", []) or []
@@ -220,8 +246,12 @@ def _handle_puck_registry(payload):
             seen_puck_ids.add(pid)
             new_ids.append((pid, p.get("color"), p.get("x"), p.get("y")))
     with pucks_lock:
+        prev_count = len(pucks)
         pucks.clear()
         pucks.extend(puck_list)
+        new_count = len(pucks)
+    if prev_count != new_count and (prev_count == 0 or new_count == 0):
+        print(f"[arena] puck_registry: {prev_count} -> {new_count}")
     for pid, color, px, py in new_ids:
         try:
             print(f"[arena] NEW puck id={pid} color={color} at ({float(px):.3f}, {float(py):.3f})")
@@ -245,10 +275,91 @@ def _handle_robot_pose_odom(payload):
     pose = value.get("pose", {})
     pos = pose.get("position")
     ori = pose.get("orientation")
-    if pos and ori:
-        with robot_lock:
-            robot_pose_odom["position"] = pos
-            robot_pose_odom["orientation"] = ori
+    if not (pos and ori):
+        return
+    with robot_lock:
+        robot_pose_odom["position"] = pos
+        robot_pose_odom["orientation"] = ori
+
+    # Append the new position to the path trail (in arena frame).
+    try:
+        ax, ay = odom_to_arena(float(pos["x"]), float(pos["y"]))
+    except (TypeError, ValueError, KeyError):
+        return
+    with path_lock:
+        if not robot_path_odom:
+            robot_path_odom.append((ax, ay))
+        else:
+            lx, ly = robot_path_odom[-1]
+            if math.hypot(ax - lx, ay - ly) >= PATH_MIN_STEP_M:
+                robot_path_odom.append((ax, ay))
+
+
+_scan_msg_count = 0
+
+
+def _handle_scan(payload):
+    """sensor_msgs/LaserScan → list of arena-frame points.
+
+    Transforms each valid range to arena frame using the latest odom pose
+    (laser frame is approximated as base_link — laser offset is small on the
+    ROSbot). If we have no robot pose yet, drops the scan.
+    """
+    global _scan_msg_count
+    value = payload.get("value", payload)
+    angle_min = value.get("angle_min")
+    angle_inc = value.get("angle_increment")
+    range_min = value.get("range_min", 0.0) or 0.0
+    range_max = value.get("range_max", 0.0) or 0.0
+    ranges = value.get("ranges") or []
+    if angle_min is None or angle_inc is None or not ranges:
+        return
+
+    with robot_lock:
+        pos = robot_pose_odom["position"]
+        ori = robot_pose_odom["orientation"]
+
+    if not pos or not ori:
+        # No pose yet — can't place the scan in the arena. Drop quietly.
+        return
+
+    rx_odom = float(pos["x"])
+    ry_odom = float(pos["y"])
+    yaw_odom = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
+
+    # Robot heading in arena frame: rotate odom yaw by ODOM_YAW_OFFSET.
+    yaw_arena = yaw_odom + ODOM_YAW_OFFSET
+
+    # Robot position in arena frame.
+    rx_arena, ry_arena = odom_to_arena(rx_odom, ry_odom)
+
+    points: list[tuple[float, float]] = []
+    for i in range(0, len(ranges), SCAN_DOWNSAMPLE):
+        r = ranges[i]
+        if r is None:
+            continue
+        try:
+            r = float(r)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(r):
+            continue
+        if r < range_min or (range_max > 0.0 and r > range_max):
+            continue
+        theta = angle_min + i * angle_inc
+        # Laser-frame point rotated into arena frame and offset by robot pos.
+        a = theta + yaw_arena
+        ax = rx_arena + r * math.cos(a)
+        ay = ry_arena + r * math.sin(a)
+        points.append((ax, ay))
+
+    with scan_lock:
+        scan_points.clear()
+        scan_points.extend(points)
+
+    _scan_msg_count += 1
+    if _scan_msg_count == 1 or _scan_msg_count % 30 == 0:
+        print(f"[arena] scan #{_scan_msg_count}: {len(ranges)} raw → {len(points)} drawn")
 
 
 # ── Stdin reader ─────────────────────────────────────────────────────────────
@@ -275,6 +386,8 @@ def start_stdin_reader():
                     _handle_robot_pose_optitrack(payload)
                 elif topic.endswith("/robot_pose_odom"):
                     _handle_robot_pose_odom(payload)
+                elif topic.endswith("/scan"):
+                    _handle_scan(payload)
             except Exception as e:
                 print(f"[arena] Bad stdin message: {e}")
 
@@ -349,6 +462,10 @@ def main():
                         for pk in pucks:
                             print(f"    id={pk['id']} color={pk['color']} status={pk['status']} "
                                   f"({pk['x']:.3f}, {pk['y']:.3f})")
+                    with scan_lock:
+                        print(f"  Scan points (drawn): {len(scan_points)}")
+                    with path_lock:
+                        print(f"  Odom path: {len(robot_path_odom)} points")
                     print(f"=========================\n")
 
                 elif event.key == pygame.K_f:
@@ -360,6 +477,11 @@ def main():
 
                 elif event.key == pygame.K_i:
                     show_info = not show_info
+
+                elif event.key == pygame.K_c:
+                    with path_lock:
+                        robot_path_odom.clear()
+                    print("[arena] Cleared odom path trail")
 
                 elif event.key == pygame.K_UP:
                     if mods & pygame.KMOD_SHIFT:
@@ -463,6 +585,14 @@ def main():
                 label_rect = label_surf.get_rect(center=label_off)
                 screen.blit(label_surf, label_rect)
 
+        # ── Odom path trail ──────────────────────────────────────────────────
+        # Drawn first so pucks / scan / robot render on top of it.
+        with path_lock:
+            path_snapshot = list(robot_path_odom)
+        if len(path_snapshot) >= 2:
+            screen_path = [map_to_screen(ax, ay) for ax, ay in path_snapshot]
+            pygame.draw.lines(screen, PATH_COLOR, False, screen_path, PATH_THICKNESS)
+
         # ── Pucks ────────────────────────────────────────────────────────────
         with pucks_lock:
             for p in pucks:
@@ -472,6 +602,13 @@ def main():
                 pygame.draw.circle(screen, color, (sx, sy), PUCK_DRAW_RADIUS)
                 if p.get("status") == 1:  # placed at home
                     pygame.draw.circle(screen, (255, 255, 255), (sx, sy), PUCK_DRAW_RADIUS + 3, 2)
+
+        # ── Lidar scan ───────────────────────────────────────────────────────
+        # Drawn under the robot so the robot icon stays readable.
+        with scan_lock:
+            for ax, ay in scan_points:
+                sx, sy = map_to_screen(ax, ay)
+                pygame.draw.circle(screen, SCAN_POINT_COLOR, (sx, sy), SCAN_POINT_RADIUS)
 
         # ── Robot ────────────────────────────────────────────────────────────
         with robot_lock:
@@ -509,11 +646,15 @@ def main():
             with robot_lock:
                 ot_str = "ok" if robot_pose_optitrack["position"] else "--"
                 od_str = "ok" if robot_pose_odom["position"] else "--"
+            with scan_lock:
+                scan_count = len(scan_points)
+            with path_lock:
+                path_count = len(robot_path_odom)
             lines = [
                 f"Origin: ({arena_x}, {arena_y})  Size: {arena_w}x{arena_h}  Corners: {known_count}/4",
-                f"Pucks: {puck_count} ({placed_count} placed)  OptiTrack: {ot_str}  Odom: {od_str}",
+                f"Pucks: {puck_count} ({placed_count} placed)  Scan: {scan_count}  Path: {path_count}  OptiTrack: {ot_str}  Odom: {od_str}",
                 f"Drag to move | Scroll to resize | Arrows: fine move | Shift+Arrows: fine size",
-                f"P: print | F: fullscreen | I: toggle info | ESC: quit",
+                f"P: print | F: fullscreen | I: toggle info | C: clear path | ESC: quit",
             ]
             for i, line in enumerate(lines):
                 text = font.render(line, True, (100, 100, 100))
