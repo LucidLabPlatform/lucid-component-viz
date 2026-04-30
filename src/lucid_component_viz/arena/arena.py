@@ -74,9 +74,9 @@ PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
 # ── Coordinate frame calibration ─────────────────────────────────────────────
 # Arena (0,0) is defined as the robot start pose, coincident with odom/map (0,0).
 # The drawn arena rectangle's BL corner sits at arena (BL_X, BL_Y) — i.e. the robot
-# starts 0.20 m right of the left wall and 0.22 m above the bottom wall.
-BL_X = -0.20
-BL_Y = -0.22
+# starts 0.30 m right of the left wall and 0.30 m above the bottom wall.
+BL_X = -0.30
+BL_Y = -0.30
 
 # OptiTrack world-frame position of arena (0,0) (= robot start)
 OPTITRACK_ORIGIN_X = 2.992316246032715
