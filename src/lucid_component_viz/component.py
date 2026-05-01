@@ -29,6 +29,33 @@ _ARENA_DATA_COMMANDS = [
     "scan",
 ]
 
+# ── Arena/robot calibration cfg ─────────────────────────────────────────────
+# Two independent groups, each all-or-nothing for start_arena:
+#   • arena: anchor corner + its OptiTrack (x, y) — places the arena rectangle
+#     in OptiTrack world.
+#   • robot: goal pose (x, y, qx, qy, qz, qw) in OptiTrack — anchors the robot
+#     tree (= odom frame) under world.
+# Field names mirror the existing reset-to-start template params so values can
+# flow through experiment templates → cfg/start_arena payload → arena.py
+# subprocess via env vars.
+_ARENA_FIELDS = ("arena_anchor_corner", "arena_anchor_x", "arena_anchor_y")
+_ROBOT_FIELDS = ("goal_x", "goal_y", "goal_qx", "goal_qy", "goal_qz", "goal_qw")
+_ALL_GOAL_FIELDS = (*_ARENA_FIELDS, *_ROBOT_FIELDS)
+_VALID_ANCHOR_CORNERS = ("TL", "TR", "BR", "BL")
+
+# Field name → env var name passed to arena.py subprocess.
+_ENV_VAR_FOR: dict[str, str] = {
+    "arena_anchor_corner": "LUCID_ARENA_ANCHOR_CORNER",
+    "arena_anchor_x":      "LUCID_ARENA_ANCHOR_X",
+    "arena_anchor_y":      "LUCID_ARENA_ANCHOR_Y",
+    "goal_x":              "LUCID_ARENA_GOAL_X",
+    "goal_y":              "LUCID_ARENA_GOAL_Y",
+    "goal_qx":             "LUCID_ARENA_GOAL_QX",
+    "goal_qy":             "LUCID_ARENA_GOAL_QY",
+    "goal_qz":             "LUCID_ARENA_GOAL_QZ",
+    "goal_qw":             "LUCID_ARENA_GOAL_QW",
+}
+
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -77,6 +104,9 @@ class VizComponent(Component):
         self._touchdesigner_file: Optional[str] = self.context.config.get(
             "touchdesigner_file", "/Users/roboticslab/Documents/WorkingProjectionV2.1.toe"
         )
+        # Arena/robot calibration cfg fields, all default None until either
+        # cfg/set persists them or they're supplied in start_arena payload.
+        self._goal_cfg: dict[str, Any] = {f: self.context.config.get(f) for f in _ALL_GOAL_FIELDS}
 
     @property
     def component_id(self) -> str:
@@ -121,6 +151,7 @@ class VizComponent(Component):
         return {
             "touchdesigner_app": self._touchdesigner_app,
             "touchdesigner_file": self._touchdesigner_file,
+            **self._goal_cfg,
         }
 
     def schema(self) -> dict[str, Any]:
@@ -144,9 +175,28 @@ class VizComponent(Component):
         s["publishes"]["cfg"]["fields"].update({
             "touchdesigner_app": {"type": "string"},
             "touchdesigner_file": {"type": "string"},
+            "arena_anchor_corner": {"type": "string"},
+            "arena_anchor_x": {"type": "number"},
+            "arena_anchor_y": {"type": "number"},
+            "goal_x": {"type": "number"},
+            "goal_y": {"type": "number"},
+            "goal_qx": {"type": "number"},
+            "goal_qy": {"type": "number"},
+            "goal_qz": {"type": "number"},
+            "goal_qw": {"type": "number"},
         })
         s["subscribes"].update({
-            "cmd/start-arena": {"fields": {}},
+            "cmd/start-arena": {"fields": {
+                "arena_anchor_corner": {"type": "string"},
+                "arena_anchor_x": {"type": "number"},
+                "arena_anchor_y": {"type": "number"},
+                "goal_x": {"type": "number"},
+                "goal_y": {"type": "number"},
+                "goal_qx": {"type": "number"},
+                "goal_qy": {"type": "number"},
+                "goal_qz": {"type": "number"},
+                "goal_qw": {"type": "number"},
+            }},
             "cmd/stop-arena": {"fields": {}},
             "cmd/start-touchdesigner": {"fields": {}},
             "cmd/stop-touchdesigner": {"fields": {}},
@@ -184,15 +234,60 @@ class VizComponent(Component):
 
     # ── Arena process management ─────────────────────────────────────────────
 
-    def _start_arena(self) -> bool:
+    def _resolve_goal_config(
+        self, payload_overrides: dict[str, Any]
+    ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        """Resolve the 9 calibration fields, all-or-nothing per group.
+
+        For each of the two groups (arena, robot), prefers payload (if
+        complete) over cfg (if complete), else fails. Returns (resolved, None)
+        on success or (None, error_message) on failure.
+        """
+        resolved: dict[str, Any] = {}
+        problems: list[str] = []
+        for group_name, fields in (("arena", _ARENA_FIELDS), ("robot", _ROBOT_FIELDS)):
+            payload_full = all(payload_overrides.get(f) is not None for f in fields)
+            cfg_full = all(self._goal_cfg.get(f) is not None for f in fields)
+            if payload_full:
+                source = {f: payload_overrides[f] for f in fields}
+            elif cfg_full:
+                source = {f: self._goal_cfg[f] for f in fields}
+            else:
+                missing = [
+                    f for f in fields
+                    if payload_overrides.get(f) is None and self._goal_cfg.get(f) is None
+                ]
+                problems.append(
+                    f"{group_name} group incomplete; missing in both payload and cfg: {missing}"
+                )
+                continue
+            resolved.update(source)
+        if problems:
+            return None, "; ".join(problems)
+        # Validate anchor corner string.
+        corner = resolved.get("arena_anchor_corner")
+        if corner not in _VALID_ANCHOR_CORNERS:
+            return None, (
+                f"arena_anchor_corner must be one of {_VALID_ANCHOR_CORNERS}, "
+                f"got {corner!r}"
+            )
+        return resolved, None
+
+    def _start_arena(self, payload_overrides: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[str]]:
+        """Start arena.py subprocess. Returns (ok, error_message_if_any)."""
         if self._arena_proc is not None and self._arena_proc.poll() is None:
             self._log.info("arena.py already running (pid=%s)", self._arena_proc.pid)
-            return True
+            return True, None
+        resolved, error = self._resolve_goal_config(payload_overrides or {})
+        if resolved is None:
+            self._log.error("start_arena: cannot resolve calibration: %s", error)
+            return False, error
         try:
             arena_path = _arena_script_path()
             env = dict(os.environ)
-            # Force unbuffered stdout/stderr so arena.py prints reach arena.log immediately.
             env["PYTHONUNBUFFERED"] = "1"
+            for field, value in resolved.items():
+                env[_ENV_VAR_FOR[field]] = str(value)
             log_dir = os.path.join(os.getenv("LUCID_AGENT_BASE_DIR", "."), "logs")
             os.makedirs(log_dir, exist_ok=True)
             arena_log = open(os.path.join(log_dir, "arena.log"), "a")
@@ -204,10 +299,10 @@ class VizComponent(Component):
                 stderr=arena_log,
             )
             self._log.info("Started arena.py (pid=%s), log: %s/arena.log", self._arena_proc.pid, log_dir)
-            return True
-        except Exception:
+            return True, None
+        except Exception as e:
             self._log.exception("Failed to start arena.py")
-            return False
+            return False, f"subprocess.Popen failed: {e}"
 
     def _on_arena_message(self, topic: str, payload_str: str) -> None:
         """Forward an MQTT message to the arena subprocess via stdin.
@@ -328,9 +423,16 @@ class VizComponent(Component):
     def on_cmd_start_arena(self, payload_str: str) -> None:
         self._log.info("cmd/start_arena received: %s", payload_str)
         request_id = self._parse_request_id(payload_str)
-        ok = self._start_arena()
+        # Pull any of the 9 calibration fields out of the payload for one-shot
+        # override; missing fields fall through to cfg.
+        try:
+            payload = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError:
+            payload = {}
+        overrides = {f: payload[f] for f in _ALL_GOAL_FIELDS if f in payload}
+        ok, error = self._start_arena(payload_overrides=overrides)
         self._log.info("start_arena result: ok=%s, request_id=%s", ok, request_id)
-        self.publish_result("start_arena", request_id, ok=ok, error=None if ok else "failed to start")
+        self.publish_result("start_arena", request_id, ok=ok, error=None if ok else error)
         try:
             self.publish_state()
         except Exception:
@@ -403,6 +505,42 @@ class VizComponent(Component):
             val = set_dict["touchdesigner_file"]
             self._touchdesigner_file = str(val) if val is not None else None
             applied["touchdesigner_file"] = self._touchdesigner_file
+
+        # Validate anchor corner before applying anything from the goal group;
+        # rejecting one field aborts the whole set so cfg never lands in a
+        # partially-bad state.
+        if "arena_anchor_corner" in set_dict:
+            corner = set_dict["arena_anchor_corner"]
+            if corner is not None and corner not in _VALID_ANCHOR_CORNERS:
+                self.publish_cfg_set_result(
+                    request_id=request_id, ok=False, applied=None,
+                    error=(
+                        f"arena_anchor_corner must be one of "
+                        f"{_VALID_ANCHOR_CORNERS}, got {corner!r}"
+                    ),
+                    ts=_utc_iso(), action="cfg/set",
+                )
+                return
+
+        for field in _ALL_GOAL_FIELDS:
+            if field not in set_dict:
+                continue
+            value = set_dict[field]
+            if value is None:
+                self._goal_cfg[field] = None
+            elif field == "arena_anchor_corner":
+                self._goal_cfg[field] = str(value)
+            else:
+                try:
+                    self._goal_cfg[field] = float(value)
+                except (TypeError, ValueError):
+                    self.publish_cfg_set_result(
+                        request_id=request_id, ok=False, applied=None,
+                        error=f"{field}={value!r} is not a valid number",
+                        ts=_utc_iso(), action="cfg/set",
+                    )
+                    return
+            applied[field] = self._goal_cfg[field]
 
         self.publish_cfg()
         self.publish_cfg_set_result(

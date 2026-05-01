@@ -137,22 +137,8 @@ def test_start_stop_idempotent(mock_popen, mock_pgrep, component):
 
 # ── Command handler tests ───────────────────────────────────────────────────
 
-@patch("lucid_component_viz.component._find_pid", return_value=None)
-@patch("lucid_component_viz.component.subprocess.Popen")
-def test_cmd_start_arena(mock_popen, mock_pgrep, component, mqtt):
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 99
-    mock_popen.return_value = mock_proc
-
-    payload = json.dumps({"request_id": "r1"})
-    component.on_cmd_start_arena(payload)
-
-    results = mqtt.by_suffix("evt/start_arena/result")
-    assert len(results) == 1
-    result_payload = json.loads(results[0]["payload"])
-    assert result_payload["request_id"] == "r1"
-    assert result_payload["ok"] is True
+# (start_arena happy-path coverage lives in test_start_arena_sets_env_from_payload
+# below, which also asserts the calibration env vars reach the subprocess.)
 
 
 @patch("lucid_component_viz.component._find_pid", return_value=None)
@@ -264,3 +250,179 @@ def test_cmd_cfg_set_touchdesigner_app(mock_pgrep, component, mqtt):
     assert result_payload["applied"]["touchdesigner_app"] == "/Applications/TD2.app"
 
     assert component._touchdesigner_app == "/Applications/TD2.app"
+
+
+# ── Arena/robot config field tests ───────────────────────────────────────────
+
+ARENA_FIELDS = ("arena_anchor_corner", "arena_anchor_x", "arena_anchor_y")
+ROBOT_FIELDS = ("goal_x", "goal_y", "goal_qx", "goal_qy", "goal_qz", "goal_qw")
+ARENA_VALUES = {
+    "arena_anchor_corner": "BL",
+    "arena_anchor_x": 3.0,
+    "arena_anchor_y": 1.83,
+}
+ROBOT_VALUES = {
+    "goal_x": 3.0,
+    "goal_y": 1.83,
+    "goal_qx": 0.0,
+    "goal_qy": 0.0,
+    "goal_qz": 0.0,
+    "goal_qw": 1.0,
+}
+ALL_GOAL_VALUES = {**ARENA_VALUES, **ROBOT_VALUES}
+
+ARENA_ENV_NAMES = {
+    "arena_anchor_corner": "LUCID_ARENA_ANCHOR_CORNER",
+    "arena_anchor_x": "LUCID_ARENA_ANCHOR_X",
+    "arena_anchor_y": "LUCID_ARENA_ANCHOR_Y",
+    "goal_x": "LUCID_ARENA_GOAL_X",
+    "goal_y": "LUCID_ARENA_GOAL_Y",
+    "goal_qx": "LUCID_ARENA_GOAL_QX",
+    "goal_qy": "LUCID_ARENA_GOAL_QY",
+    "goal_qz": "LUCID_ARENA_GOAL_QZ",
+    "goal_qw": "LUCID_ARENA_GOAL_QW",
+}
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_cfg_payload_includes_arena_robot_fields(mock_pgrep, component):
+    cfg = component.get_cfg_payload()
+    for field in (*ARENA_FIELDS, *ROBOT_FIELDS):
+        assert field in cfg, f"missing cfg field: {field}"
+        assert cfg[field] is None  # default unset
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_cmd_cfg_set_arena_robot_fields(mock_pgrep, component, mqtt):
+    payload = json.dumps({"request_id": "rc-a", "set": ALL_GOAL_VALUES})
+    component.on_cmd_cfg_set(payload)
+    results = mqtt.by_suffix("evt/cfg/set/result")
+    result_payload = json.loads(results[-1]["payload"])
+    assert result_payload["ok"] is True
+    cfg = component.get_cfg_payload()
+    for k, v in ALL_GOAL_VALUES.items():
+        assert cfg[k] == v
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_cmd_cfg_set_invalid_corner_rejected(mock_pgrep, component, mqtt):
+    payload = json.dumps({
+        "request_id": "rc-b",
+        "set": {"arena_anchor_corner": "middle"},
+    })
+    component.on_cmd_cfg_set(payload)
+    result_payload = json.loads(mqtt.by_suffix("evt/cfg/set/result")[-1]["payload"])
+    assert result_payload["ok"] is False
+    assert "anchor_corner" in (result_payload.get("error") or "")
+    cfg = component.get_cfg_payload()
+    assert cfg["arena_anchor_corner"] is None  # not persisted
+
+
+# ── start_arena env-var wiring tests ────────────────────────────────────────
+
+def _capture_popen():
+    """Returns (mock_popen, captured_env_holder).
+
+    captured_env_holder['env'] is set on Popen call.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_popen(*args, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 7777
+        proc.wait.return_value = 0
+        return proc
+
+    return fake_popen, captured
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_sets_env_from_payload(mock_pgrep, component, mqtt):
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r1", **ALL_GOAL_VALUES}))
+    result = json.loads(mqtt.by_suffix("evt/start_arena/result")[-1]["payload"])
+    assert result["ok"] is True, result
+    env = captured["env"]
+    for field, value in ALL_GOAL_VALUES.items():
+        assert env[ARENA_ENV_NAMES[field]] == str(value)
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_uses_cfg_when_payload_partial(mock_pgrep, component, mqtt):
+    # Persist all 9 in cfg first.
+    component.on_cmd_cfg_set(json.dumps({"request_id": "rc", "set": ALL_GOAL_VALUES}))
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        # Payload missing all goal fields → cfg supplies them.
+        component.on_cmd_start_arena(json.dumps({"request_id": "r2"}))
+    result = json.loads(mqtt.by_suffix("evt/start_arena/result")[-1]["payload"])
+    assert result["ok"] is True, result
+    env = captured["env"]
+    for field, value in ALL_GOAL_VALUES.items():
+        assert env[ARENA_ENV_NAMES[field]] == str(value)
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_payload_overrides_cfg(mock_pgrep, component, mqtt):
+    component.on_cmd_cfg_set(json.dumps({"request_id": "rc", "set": ALL_GOAL_VALUES}))
+    overrides = {**ALL_GOAL_VALUES, "goal_x": 9.99, "arena_anchor_corner": "TR"}
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r3", **overrides}))
+    env = captured["env"]
+    assert env["LUCID_ARENA_GOAL_X"] == "9.99"
+    assert env["LUCID_ARENA_ANCHOR_CORNER"] == "TR"
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_cross_group_independence(mock_pgrep, component, mqtt):
+    # Arena group from cfg, robot group from payload.
+    component.on_cmd_cfg_set(json.dumps({"request_id": "rc", "set": ARENA_VALUES}))
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r4", **ROBOT_VALUES}))
+    result = json.loads(mqtt.by_suffix("evt/start_arena/result")[-1]["payload"])
+    assert result["ok"] is True, result
+    env = captured["env"]
+    for field, value in ARENA_VALUES.items():
+        assert env[ARENA_ENV_NAMES[field]] == str(value)
+    for field, value in ROBOT_VALUES.items():
+        assert env[ARENA_ENV_NAMES[field]] == str(value)
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_fails_when_groups_incomplete(mock_pgrep, component, mqtt):
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r5"}))
+    result = json.loads(mqtt.by_suffix("evt/start_arena/result")[-1]["payload"])
+    assert result["ok"] is False
+    error = result.get("error") or ""
+    assert "arena" in error or "goal" in error
+    assert "env" not in captured  # subprocess never spawned
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_fails_with_only_arena_group(mock_pgrep, component, mqtt):
+    component.on_cmd_cfg_set(json.dumps({"request_id": "rc", "set": ARENA_VALUES}))
+    fake_popen, captured = _capture_popen()
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        # No robot group anywhere.
+        component.on_cmd_start_arena(json.dumps({"request_id": "r6"}))
+    result = json.loads(mqtt.by_suffix("evt/start_arena/result")[-1]["payload"])
+    assert result["ok"] is False
+    assert "goal" in (result.get("error") or "")
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_schema_includes_arena_robot_fields(mock_pgrep, component):
+    s = component.schema()
+    cfg_fields = s["publishes"]["cfg"]["fields"]
+    for f in (*ARENA_FIELDS, *ROBOT_FIELDS):
+        assert f in cfg_fields, f"cfg schema missing {f}"
+    start_fields = s["subscribes"]["cmd/start-arena"]["fields"]
+    for f in (*ARENA_FIELDS, *ROBOT_FIELDS):
+        assert f in start_fields, f"start-arena schema missing {f}"
