@@ -24,6 +24,18 @@ import math
 import threading
 from collections import deque
 
+from lucid_component_viz.arena.config import (
+    ConfigError,
+    compute_bl_optitrack,
+    parse_env_config,
+)
+from lucid_component_viz.arena.config import (
+    odom_to_arena as _odom_to_arena,
+)
+from lucid_component_viz.arena.config import (
+    optitrack_to_arena as _optitrack_to_arena,
+)
+
 # ── Display ──────────────────────────────────────────────────────────────────
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
@@ -71,20 +83,39 @@ PATH_THICKNESS = 2
 PATH_MAX_POINTS = 2000                  # ~ several minutes of motion
 PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
 
-# ── Coordinate frame calibration ─────────────────────────────────────────────
-# Arena (0,0) is defined as the robot start pose, coincident with odom/map (0,0).
-# The drawn arena rectangle's BL corner sits at arena (BL_X, BL_Y) — i.e. the robot
-# starts 0.30 m right of the left wall and 0.30 m above the bottom wall.
-BL_X = -0.30
-BL_Y = -0.30
+# ── Coordinate frame calibration (loaded from env at startup) ───────────────
+# Two independent trees rooted at OptiTrack world:
+#   • arena: anchored to world via one corner (LUCID_ARENA_ANCHOR_*).
+#     Arena (0,0) = BL corner of the rectangle. Axes fixed: arena +X = OT -X,
+#     arena +Y = OT -Y.
+#   • robot tree (= odom frame): anchored to world via robot goal pose
+#     (LUCID_ARENA_GOAL_*). Pucks, ArUco, lidar all attach here.
+# All env vars are required — see config.parse_env_config.
+try:
+    _ARENA_CFG, _ROBOT_CFG = parse_env_config()
+except ConfigError as e:
+    print(f"[arena] FATAL: {e}", file=sys.stderr)
+    sys.exit(1)
 
-# OptiTrack world-frame position of arena (0,0) (= robot start)
-OPTITRACK_ORIGIN_X = 2.992316246032715
-OPTITRACK_ORIGIN_Y = 1.827694296836853
+BL_OPTITRACK_X, BL_OPTITRACK_Y = compute_bl_optitrack(
+    _ARENA_CFG.anchor_corner,
+    _ARENA_CFG.anchor_x,
+    _ARENA_CFG.anchor_y,
+    ARENA_METERS_W,
+    ARENA_METERS_H,
+)
+GOAL_X = _ROBOT_CFG.goal_x
+GOAL_Y = _ROBOT_CFG.goal_y
+GOAL_YAW = _ROBOT_CFG.goal_yaw
+# Net yaw rotation from odom to arena: rotate by GOAL_YAW (odom→world)
+# then by π (world→arena axis flip). Used to map yaw values (not positions).
+ODOM_TO_ARENA_YAW = GOAL_YAW + math.pi
 
-# Angle odom's +X axis makes with arena's +X axis at odom reset.
-# Robot faces TR corner at start.
-ODOM_YAW_OFFSET = 0.7552700000000000
+print(
+    f"[arena] config: anchor={_ARENA_CFG.anchor_corner} "
+    f"BL_OT=({BL_OPTITRACK_X:.3f}, {BL_OPTITRACK_Y:.3f}) "
+    f"goal=({GOAL_X:.3f}, {GOAL_Y:.3f}) yaw={GOAL_YAW:.4f}"
+)
 
 # ── Corner state ─────────────────────────────────────────────────────────────
 corners = [
@@ -123,34 +154,31 @@ path_lock = threading.Lock()
 # ── Coordinate mapping ───────────────────────────────────────────────────────
 def map_to_screen(mx, my):
     """Convert arena coordinates (meters) to screen pixels.
-    Arena (0,0) = robot start; the drawn rectangle's BL corner sits at arena (BL_X, BL_Y)."""
+    Arena (0,0) = BL corner of the drawn rectangle."""
     px_per_m_x = arena_w / ARENA_METERS_W
     px_per_m_y = arena_h / ARENA_METERS_H
-    sx = arena_x + (mx - BL_X) * px_per_m_x
-    sy = arena_y + arena_h - (my - BL_Y) * px_per_m_y  # Y inverted for pygame
+    sx = arena_x + mx * px_per_m_x
+    sy = arena_y + arena_h - my * px_per_m_y  # Y inverted for pygame
     return int(sx), int(sy)
 
 
 def optitrack_to_arena(ox, oy):
-    """OptiTrack world frame → arena frame (metres, origin = robot start).
-    OptiTrack: left=+X, top→bottom=+Y. Arena: right=+X, bottom→top=+Y.
-    Both axes are flipped: X negated, Y negated."""
-    return OPTITRACK_ORIGIN_X - ox, OPTITRACK_ORIGIN_Y - oy
+    """OptiTrack world frame → arena frame (metres). Axes flipped."""
+    return _optitrack_to_arena(BL_OPTITRACK_X, BL_OPTITRACK_Y, ox, oy)
 
 
 def odom_to_arena(ox, oy):
-    """Odom frame → arena frame. Origins coincide (both at robot start), so pure rotation.
-    Odom yaw=0 points in the ODOM_YAW_OFFSET direction in arena frame."""
-    c = math.cos(ODOM_YAW_OFFSET)
-    s = math.sin(ODOM_YAW_OFFSET)
-    return ox * c - oy * s, ox * s + oy * c
+    """Robot-tree (odom) frame → arena frame.
+    Composition: odom → world (rotate by GOAL_YAW, translate by goal pose),
+    then world → arena (axis-flipped translation)."""
+    return _odom_to_arena(
+        BL_OPTITRACK_X, BL_OPTITRACK_Y, GOAL_X, GOAL_Y, GOAL_YAW, ox, oy
+    )
 
 
 def map_to_arena(mx, my):
-    """ROS map frame → arena frame. Map shares origin/rotation with odom, so same transform."""
-    c = math.cos(ODOM_YAW_OFFSET)
-    s = math.sin(ODOM_YAW_OFFSET)
-    return mx * c - my * s, mx * s + my * c
+    """ROS map frame → arena frame. Map shares origin/rotation with odom."""
+    return odom_to_arena(mx, my)
 
 
 def quaternion_to_yaw(qx, qy, qz, qw):
@@ -171,9 +199,10 @@ def corner_screen_positions():
 
 
 def corner_slot_for(x, y):
-    """Slot index (0=TL, 1=TR, 2=BR, 3=BL) by quadrant relative to arena centre."""
-    cx = BL_X + ARENA_METERS_W / 2
-    cy = BL_Y + ARENA_METERS_H / 2
+    """Slot index (0=TL, 1=TR, 2=BR, 3=BL) by quadrant relative to arena centre.
+    Arena (0,0) = BL corner, so centre is at half-width/height."""
+    cx = ARENA_METERS_W / 2
+    cy = ARENA_METERS_H / 2
     right = x >= cx
     top   = y >= cy
     if top and not right:    return 0
@@ -327,8 +356,9 @@ def _handle_scan(payload):
     ry_odom = float(pos["y"])
     yaw_odom = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
 
-    # Robot heading in arena frame: rotate odom yaw by ODOM_YAW_OFFSET.
-    yaw_arena = yaw_odom + ODOM_YAW_OFFSET
+    # Robot heading in arena frame: rotate odom yaw by ODOM_TO_ARENA_YAW
+    # (= GOAL_YAW + π, the combined odom→world→arena rotation for directions).
+    yaw_arena = yaw_odom + ODOM_TO_ARENA_YAW
 
     # Robot position in arena frame.
     rx_arena, ry_arena = odom_to_arena(rx_odom, ry_odom)
@@ -634,7 +664,7 @@ def main():
             draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=0.0, negate_yaw=True)
         if od_pos and od_ori:
             ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
-            draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_YAW_OFFSET)
+            draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_TO_ARENA_YAW)
 
         # ── Info overlay ─────────────────────────────────────────────────────
         if show_info:
