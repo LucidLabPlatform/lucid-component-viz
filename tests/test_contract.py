@@ -418,6 +418,59 @@ def test_start_arena_fails_with_only_arena_group(mock_pgrep, component, mqtt):
 
 
 @patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_when_running_restarts_with_new_config(mock_pgrep, component, mqtt):
+    captured: list[dict[str, Any]] = []
+
+    def fake_popen(*args, **kwargs):
+        captured.append(kwargs.get("env", {}))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 1000 + len(captured)
+        proc.wait.return_value = 0
+        return proc
+
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r1", **ALL_GOAL_VALUES}))
+        new_values = {**ALL_GOAL_VALUES, "goal_x": 9.99}
+        component.on_cmd_start_arena(json.dumps({"request_id": "r2", **new_values}))
+
+    # Two Popen calls = restart happened.
+    assert len(captured) == 2
+    assert captured[0]["LUCID_ARENA_GOAL_X"] == "3.0"
+    assert captured[1]["LUCID_ARENA_GOAL_X"] == "9.99"
+    # Both invocations succeed.
+    results = mqtt.by_suffix("evt/start_arena/result")
+    assert json.loads(results[0]["payload"])["ok"] is True
+    assert json.loads(results[1]["payload"])["ok"] is True
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
+def test_start_arena_invalid_config_keeps_running_arena(mock_pgrep, component, mqtt):
+    captured: list[dict[str, Any]] = []
+
+    def fake_popen(*args, **kwargs):
+        captured.append(kwargs.get("env", {}))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 1000 + len(captured)
+        proc.wait.return_value = 0
+        return proc
+
+    with patch("lucid_component_viz.component.subprocess.Popen", side_effect=fake_popen):
+        component.on_cmd_start_arena(json.dumps({"request_id": "r1", **ALL_GOAL_VALUES}))
+        first_proc = component._arena_proc
+        # Empty payload + empty cfg → resolution fails; arena should NOT be stopped.
+        component.on_cmd_start_arena(json.dumps({"request_id": "r2"}))
+
+    assert len(captured) == 1  # only the first spawn happened
+    assert component._arena_proc is first_proc  # still the original process
+    # First call succeeded, second failed.
+    results = [json.loads(r["payload"]) for r in mqtt.by_suffix("evt/start_arena/result")]
+    assert results[0]["ok"] is True
+    assert results[1]["ok"] is False
+
+
+@patch("lucid_component_viz.component._find_pid", return_value=None)
 def test_schema_includes_arena_robot_fields(mock_pgrep, component):
     s = component.schema()
     cfg_fields = s["publishes"]["cfg"]["fields"]

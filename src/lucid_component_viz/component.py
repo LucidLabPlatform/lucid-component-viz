@@ -274,14 +274,22 @@ class VizComponent(Component):
         return resolved, None
 
     def _start_arena(self, payload_overrides: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[str]]:
-        """Start arena.py subprocess. Returns (ok, error_message_if_any)."""
-        if self._arena_proc is not None and self._arena_proc.poll() is None:
-            self._log.info("arena.py already running (pid=%s)", self._arena_proc.pid)
-            return True, None
+        """Start arena.py subprocess. If already running, restarts with the
+        resolved calibration. Returns (ok, error_message_if_any).
+
+        Resolution happens before any teardown so an invalid payload never
+        kills a working arena.
+        """
         resolved, error = self._resolve_goal_config(payload_overrides or {})
         if resolved is None:
             self._log.error("start_arena: cannot resolve calibration: %s", error)
             return False, error
+        if self._arena_proc is not None and self._arena_proc.poll() is None:
+            self._log.info(
+                "arena.py already running (pid=%s); restarting with resolved config",
+                self._arena_proc.pid,
+            )
+            self._stop_arena()
         try:
             arena_path = _arena_script_path()
             env = dict(os.environ)
