@@ -666,6 +666,24 @@ def main():
             ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
             draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_TO_ARENA_YAW)
 
+        # ── Calibration markers: OT origin + GOAL pose ───────────────────────
+        _ot_sx, _ot_sy = map_to_screen(*optitrack_to_arena(0.0, 0.0))
+        if 0 <= _ot_sx < WINDOW_WIDTH and 0 <= _ot_sy < WINDOW_HEIGHT:
+            pygame.draw.circle(screen, (255, 165, 0), (_ot_sx, _ot_sy), 6, 2)
+            pygame.draw.line(screen, (255, 165, 0), (_ot_sx - 8, _ot_sy), (_ot_sx + 8, _ot_sy), 2)
+            pygame.draw.line(screen, (255, 165, 0), (_ot_sx, _ot_sy - 8), (_ot_sx, _ot_sy + 8), 2)
+            screen.blit(_tf_font.render("OT", True, (255, 165, 0)), (_ot_sx + 10, _ot_sy - 6))
+
+        _goal_ax, _goal_ay = optitrack_to_arena(GOAL_X, GOAL_Y)
+        _goal_ori = {
+            "x": _ROBOT_CFG.goal_qx, "y": _ROBOT_CFG.goal_qy,
+            "z": _ROBOT_CFG.goal_qz, "w": _ROBOT_CFG.goal_qw,
+        }
+        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=0.0, negate_yaw=True)
+        _goal_sx, _goal_sy = map_to_screen(_goal_ax, _goal_ay)
+        if 0 <= _goal_sx < WINDOW_WIDTH and 0 <= _goal_sy < WINDOW_HEIGHT:
+            screen.blit(_tf_font.render("GOAL", True, (255, 0, 255)), (_goal_sx + 12, _goal_sy - 6))
+
         # ── Info overlay ─────────────────────────────────────────────────────
         if show_info:
             with corners_lock:
