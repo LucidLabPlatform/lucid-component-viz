@@ -12,7 +12,7 @@ Controls:
   - P: Print current calibration + robot/puck state to console
   - F: Toggle fullscreen
   - I: Toggle info overlay
-  - C: Clear the odom path trail
+  - C: Clear the path trails (odom + OptiTrack)
   - ESC: Quit
 """
 
@@ -77,8 +77,9 @@ SCAN_POINT_RADIUS = 2
 SCAN_POINT_COLOR = (255, 0, 255)        # magenta
 SCAN_DOWNSAMPLE = 2                     # draw every Nth range (1 = all)
 
-# Odom path trail (breadcrumbs of where the robot has been)
-PATH_COLOR = (0, 120, 180)              # dim cyan, related to odom robot colour
+# Path trails (breadcrumbs of where the robot has been)
+PATH_COLOR_ODOM      = (0, 120, 180)    # dim cyan, related to odom robot colour
+PATH_COLOR_OPTITRACK = (180, 180, 0)    # dim yellow, related to optitrack robot colour
 PATH_THICKNESS = 2
 PATH_MAX_POINTS = 2000                  # ~ several minutes of motion
 PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
@@ -145,9 +146,10 @@ robot_lock = threading.Lock()
 scan_points: list[tuple[float, float]] = []
 scan_lock = threading.Lock()
 
-# ── Odom path state ──────────────────────────────────────────────────────────
-# Trail of robot positions in arena frame, derived from /odom.
-robot_path_odom: deque[tuple[float, float]] = deque(maxlen=PATH_MAX_POINTS)
+# ── Path state ───────────────────────────────────────────────────────────────
+# Trails of robot positions in arena frame, one per pose source.
+robot_path_odom:      deque[tuple[float, float]] = deque(maxlen=PATH_MAX_POINTS)
+robot_path_optitrack: deque[tuple[float, float]] = deque(maxlen=PATH_MAX_POINTS)
 path_lock = threading.Lock()
 
 
@@ -293,10 +295,23 @@ def _handle_robot_pose_optitrack(payload):
     pose = value.get("pose", {})
     pos = pose.get("position")
     ori = pose.get("orientation")
-    if pos and ori:
-        with robot_lock:
-            robot_pose_optitrack["position"] = pos
-            robot_pose_optitrack["orientation"] = ori
+    if not (pos and ori):
+        return
+    with robot_lock:
+        robot_pose_optitrack["position"] = pos
+        robot_pose_optitrack["orientation"] = ori
+
+    try:
+        ax, ay = optitrack_to_arena(float(pos["x"]), float(pos["y"]))
+    except (TypeError, ValueError, KeyError):
+        return
+    with path_lock:
+        if not robot_path_optitrack:
+            robot_path_optitrack.append((ax, ay))
+        else:
+            lx, ly = robot_path_optitrack[-1]
+            if math.hypot(ax - lx, ay - ly) >= PATH_MIN_STEP_M:
+                robot_path_optitrack.append((ax, ay))
 
 
 def _handle_robot_pose_odom(payload):
@@ -496,6 +511,7 @@ def main():
                         print(f"  Scan points (drawn): {len(scan_points)}")
                     with path_lock:
                         print(f"  Odom path: {len(robot_path_odom)} points")
+                        print(f"  OptiTrack path: {len(robot_path_optitrack)} points")
                     print(f"=========================\n")
 
                 elif event.key == pygame.K_f:
@@ -511,7 +527,8 @@ def main():
                 elif event.key == pygame.K_c:
                     with path_lock:
                         robot_path_odom.clear()
-                    print("[arena] Cleared odom path trail")
+                        robot_path_optitrack.clear()
+                    print("[arena] Cleared path trails")
 
                 elif event.key == pygame.K_UP:
                     if mods & pygame.KMOD_SHIFT:
@@ -615,13 +632,17 @@ def main():
                 label_rect = label_surf.get_rect(center=label_off)
                 screen.blit(label_surf, label_rect)
 
-        # ── Odom path trail ──────────────────────────────────────────────────
-        # Drawn first so pucks / scan / robot render on top of it.
+        # ── Path trails ──────────────────────────────────────────────────────
+        # Drawn first so pucks / scan / robot render on top of them.
         with path_lock:
-            path_snapshot = list(robot_path_odom)
-        if len(path_snapshot) >= 2:
-            screen_path = [map_to_screen(ax, ay) for ax, ay in path_snapshot]
-            pygame.draw.lines(screen, PATH_COLOR, False, screen_path, PATH_THICKNESS)
+            odom_snapshot = list(robot_path_odom)
+            ot_snapshot   = list(robot_path_optitrack)
+        if len(odom_snapshot) >= 2:
+            screen_path = [map_to_screen(ax, ay) for ax, ay in odom_snapshot]
+            pygame.draw.lines(screen, PATH_COLOR_ODOM, False, screen_path, PATH_THICKNESS)
+        if len(ot_snapshot) >= 2:
+            screen_path = [map_to_screen(ax, ay) for ax, ay in ot_snapshot]
+            pygame.draw.lines(screen, PATH_COLOR_OPTITRACK, False, screen_path, PATH_THICKNESS)
 
         # ── Pucks ────────────────────────────────────────────────────────────
         with pucks_lock:
@@ -697,10 +718,11 @@ def main():
             with scan_lock:
                 scan_count = len(scan_points)
             with path_lock:
-                path_count = len(robot_path_odom)
+                odom_path_count = len(robot_path_odom)
+                ot_path_count   = len(robot_path_optitrack)
             lines = [
                 f"Origin: ({arena_x}, {arena_y})  Size: {arena_w}x{arena_h}  Corners: {known_count}/4",
-                f"Pucks: {puck_count} ({placed_count} placed)  Scan: {scan_count}  Path: {path_count}  OptiTrack: {ot_str}  Odom: {od_str}",
+                f"Pucks: {puck_count} ({placed_count} placed)  Scan: {scan_count}  Path: o={odom_path_count} ot={ot_path_count}  OptiTrack: {ot_str}  Odom: {od_str}",
                 f"Drag to move | Scroll to resize | Arrows: fine move | Shift+Arrows: fine size",
                 f"P: print | F: fullscreen | I: toggle info | C: clear path | ESC: quit",
             ]
