@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from importlib import resources
 from typing import Any, Optional
@@ -97,7 +98,9 @@ class VizComponent(Component):
         self._stop_event = threading.Event()
         self._health_thread: Optional[threading.Thread] = None
         self._arena_proc: Optional[subprocess.Popen] = None
+        self._arena_log_handle: Optional[Any] = None
         self._td_pid: Optional[int] = None
+        self._last_dead_publish_ts: float = 0.0
         self._touchdesigner_app: str = self.context.config.get(
             "touchdesigner_app", "/Applications/TouchDesigner.app"
         )
@@ -299,6 +302,7 @@ class VizComponent(Component):
             log_dir = os.path.join(os.getenv("LUCID_AGENT_BASE_DIR", "."), "logs")
             os.makedirs(log_dir, exist_ok=True)
             arena_log = open(os.path.join(log_dir, "arena.log"), "a")
+            self._arena_log_handle = arena_log
             self._arena_proc = subprocess.Popen(
                 [sys.executable, "-u", arena_path],
                 env=env,
@@ -317,9 +321,20 @@ class VizComponent(Component):
 
         Drops are logged (not silenced) so we can see when arena is wedged or
         the pipe is full. Use suffix-only topic in log to keep volume readable.
+
+        When the arena process has died, publishes state immediately (debounced
+        to once per second) so operators see the dead state without waiting for
+        the next health-loop tick.
         """
         proc = self._arena_proc
         if proc is None or proc.poll() is not None or proc.stdin is None:
+            now = time.monotonic()
+            if now - self._last_dead_publish_ts >= 1.0:
+                self._last_dead_publish_ts = now
+                self._log.error(
+                    "arena forward: subprocess is not running; dropping %s", topic
+                )
+                self.publish_state()
             return
         try:
             payload = json.loads(payload_str) if payload_str else {}
@@ -331,7 +346,11 @@ class VizComponent(Component):
             proc.stdin.write(line.encode())
             proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:
-            self._log.warning("arena forward: stdin write failed for %s: %s", topic, e)
+            self._log.error("arena forward: arena subprocess died (BrokenPipe) for %s: %s", topic, e)
+            now = time.monotonic()
+            if now - self._last_dead_publish_ts >= 1.0:
+                self._last_dead_publish_ts = now
+                self.publish_state()
         except Exception:
             self._log.exception("arena forward: unexpected error for %s", topic)
 
@@ -339,6 +358,12 @@ class VizComponent(Component):
         proc = self._arena_proc
         if proc is None or proc.poll() is not None:
             self._arena_proc = None
+            if self._arena_log_handle is not None:
+                try:
+                    self._arena_log_handle.close()
+                except Exception:
+                    pass
+                self._arena_log_handle = None
             return True
         try:
             if proc.stdin:
@@ -358,6 +383,12 @@ class VizComponent(Component):
             return False
         finally:
             self._arena_proc = None
+            if self._arena_log_handle is not None:
+                try:
+                    self._arena_log_handle.close()
+                except Exception:
+                    pass
+                self._arena_log_handle = None
         return True
 
     # ── TouchDesigner process management ─────────────────────────────────────
