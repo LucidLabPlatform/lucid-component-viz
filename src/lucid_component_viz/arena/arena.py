@@ -28,11 +28,8 @@ from lucid_component_viz.arena.config import (
     ConfigError,
     compute_bl_optitrack,
     parse_env_config,
-)
-from lucid_component_viz.arena.config import (
+    quaternion_to_yaw,
     odom_to_arena as _odom_to_arena,
-)
-from lucid_component_viz.arena.config import (
     optitrack_to_arena as _optitrack_to_arena,
 )
 
@@ -178,18 +175,6 @@ def odom_to_arena(ox, oy):
     )
 
 
-def map_to_arena(mx, my):
-    """ROS map frame → arena frame. Map shares origin/rotation with odom."""
-    return odom_to_arena(mx, my)
-
-
-def quaternion_to_yaw(qx, qy, qz, qw):
-    """Extract yaw angle (radians) from quaternion."""
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return math.atan2(siny_cosp, cosy_cosp)
-
-
 def corner_screen_positions():
     """Return (x, y) screen positions for each corner: TL, TR, BR, BL."""
     return [
@@ -250,7 +235,7 @@ def _handle_aruco_registry(payload):
         y = m.get("y")
         if marker_id is None or x is None or y is None:
             continue
-        ax, ay = map_to_arena(float(x), float(y))
+        ax, ay = odom_to_arena(float(x), float(y))
         mid = int(marker_id)
         assign_corner(mid, ax, ay)
         if mid not in seen_marker_ids:
@@ -648,7 +633,7 @@ def main():
         with pucks_lock:
             for p in pucks:
                 color = COLOR_MAP.get(p.get("color"), (200, 200, 200))
-                ax, ay = map_to_arena(p.get("x", 0), p.get("y", 0))
+                ax, ay = odom_to_arena(p.get("x", 0), p.get("y", 0))
                 sx, sy = map_to_screen(ax, ay)
                 pygame.draw.circle(screen, color, (sx, sy), PUCK_DRAW_RADIUS)
                 if p.get("status") == 1:  # placed at home
