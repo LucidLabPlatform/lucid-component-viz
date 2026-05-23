@@ -37,11 +37,11 @@ from lucid_component_viz.arena.config import (
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# ── Calibrated arena (538px = 2.1m x 2.1m) ─────────────────────────────────
-arena_w = 538
-arena_h = 538
-arena_x = 890
-arena_y = 0
+# ── Calibrated arena (828px = 2.1m x 2.1m) ─────────────────────────────────
+arena_w = 828
+arena_h = 828
+arena_x = 516
+arena_y = 215
 
 ARENA_METERS_W = 2.1
 ARENA_METERS_H = 2.1
