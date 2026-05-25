@@ -653,11 +653,9 @@ def main():
             od_pos = robot_pose_odom["position"]
             od_ori = robot_pose_odom["orientation"]
 
-        def draw_robot(ax, ay, ori, color, yaw_offset=0.0, negate_yaw=False):
+        def draw_robot(ax, ay, ori, color, yaw_offset=0.0):
             sx, sy = map_to_screen(ax, ay)
             yaw = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
-            if negate_yaw:
-                yaw = -yaw
             yaw += yaw_offset
             s = ROBOT_SIZE
             tip   = (sx + int(s * math.cos(yaw)),             sy - int(s * math.sin(yaw)))
@@ -667,7 +665,7 @@ def main():
 
         if ot_pos and ot_ori:
             ax, ay = optitrack_to_arena(ot_pos["x"], ot_pos["y"])
-            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=0.0, negate_yaw=True)
+            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=math.pi)
         if od_pos and od_ori:
             ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
             draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_TO_ARENA_YAW)
@@ -685,7 +683,7 @@ def main():
             "x": _ROBOT_CFG.goal_qx, "y": _ROBOT_CFG.goal_qy,
             "z": _ROBOT_CFG.goal_qz, "w": _ROBOT_CFG.goal_qw,
         }
-        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=0.0, negate_yaw=True)
+        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=math.pi)
         _goal_sx, _goal_sy = map_to_screen(_goal_ax, _goal_ay)
         if 0 <= _goal_sx < WINDOW_WIDTH and 0 <= _goal_sy < WINDOW_HEIGHT:
             screen.blit(_tf_font.render("GOAL", True, (255, 0, 255)), (_goal_sx + 12, _goal_sy - 6))
