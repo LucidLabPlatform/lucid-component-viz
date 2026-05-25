@@ -105,9 +105,12 @@ BL_OPTITRACK_X, BL_OPTITRACK_Y = compute_bl_optitrack(
 GOAL_X = _ROBOT_CFG.goal_x
 GOAL_Y = _ROBOT_CFG.goal_y
 GOAL_YAW = _ROBOT_CFG.goal_yaw
-# Net yaw rotation from odom to arena: rotate by GOAL_YAW (odom→world)
-# then by π (world→arena axis flip). Used to map yaw values (not positions).
-ODOM_TO_ARENA_YAW = GOAL_YAW + math.pi
+# Net yaw rotation from odom to arena: rotate by GOAL_YAW (odom→world),
+# then by π (world→arena 180° axis flip), then by another π/2 to compensate
+# for the OT pose quaternion's 90° offset (Motive Y-up → ROS Z-up axis swap
+# in the optitrack driver rotates orientations 90° in the floor plane even
+# though positions remain in a 180°-rotated frame). Total: GOAL_YAW + 3π/2.
+ODOM_TO_ARENA_YAW = GOAL_YAW + 3 * math.pi / 2
 
 print(
     f"[arena] config: anchor={_ARENA_CFG.anchor_corner} "
@@ -357,7 +360,7 @@ def _handle_scan(payload):
     yaw_odom = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
 
     # Robot heading in arena frame: rotate odom yaw by ODOM_TO_ARENA_YAW
-    # (= GOAL_YAW + π, the combined odom→world→arena rotation for directions).
+    # (= GOAL_YAW + 3π/2; see comment near ODOM_TO_ARENA_YAW for derivation).
     yaw_arena = yaw_odom + ODOM_TO_ARENA_YAW
 
     # Robot position in arena frame.
@@ -665,7 +668,7 @@ def main():
 
         if ot_pos and ot_ori:
             ax, ay = optitrack_to_arena(ot_pos["x"], ot_pos["y"])
-            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=math.pi)
+            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=3 * math.pi / 2)
         if od_pos and od_ori:
             ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
             draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_TO_ARENA_YAW)
@@ -683,7 +686,7 @@ def main():
             "x": _ROBOT_CFG.goal_qx, "y": _ROBOT_CFG.goal_qy,
             "z": _ROBOT_CFG.goal_qz, "w": _ROBOT_CFG.goal_qw,
         }
-        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=math.pi)
+        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=3 * math.pi / 2)
         _goal_sx, _goal_sy = map_to_screen(_goal_ax, _goal_ay)
         if 0 <= _goal_sx < WINDOW_WIDTH and 0 <= _goal_sy < WINDOW_HEIGHT:
             screen.blit(_tf_font.render("GOAL", True, (255, 0, 255)), (_goal_sx + 12, _goal_sy - 6))
