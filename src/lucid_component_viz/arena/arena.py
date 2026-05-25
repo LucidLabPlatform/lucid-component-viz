@@ -47,13 +47,16 @@ ARENA_METERS_W = 2.1
 ARENA_METERS_H = 2.1
 
 # ── Visual ───────────────────────────────────────────────────────────────────
-BORDER_THICKNESS = 4
+BORDER_THICKNESS = 8
 BORDER_COLOR = (255, 255, 255)
 BG_COLOR = (0, 0, 0)
 GUIDE_COLOR = (40, 40, 40)
 CORNER_UNKNOWN_COLOR = (100, 100, 100)
-CORNER_RADIUS = 84
-CORNER_FONT_SIZE = 14
+CORNER_OUTLINE_COLOR = (0, 0, 0)
+CORNER_OUTLINE_THICKNESS = 6
+CORNER_RADIUS = 120
+CORNER_FONT_SIZE = 24
+CORNER_TEXT_COLOR = (0, 0, 0)
 
 RESIZE_STEP = 10
 FINE_STEP = 1
@@ -64,8 +67,8 @@ COLOR_MAP = {
     2: (0, 255, 0),
     3: (0, 0, 255),
 }
-PUCK_DRAW_RADIUS = 8
-ROBOT_SIZE = 15
+PUCK_DIAMETER_M = 0.06
+ROBOT_SIZE = 35
 ROBOT_COLOR_OPTITRACK = (255, 255, 0)   # yellow
 ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
 
@@ -77,7 +80,7 @@ SCAN_DOWNSAMPLE = 2                     # draw every Nth range (1 = all)
 # Path trails (breadcrumbs of where the robot has been)
 PATH_COLOR_ODOM      = (0, 120, 180)    # dim cyan, related to odom robot colour
 PATH_COLOR_OPTITRACK = (180, 180, 0)    # dim yellow, related to optitrack robot colour
-PATH_THICKNESS = 2
+PATH_THICKNESS = 6
 PATH_MAX_POINTS = 2000                  # ~ several minutes of motion
 PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
 
@@ -571,10 +574,9 @@ def main():
         pygame.draw.line(screen, GUIDE_COLOR, (WINDOW_WIDTH // 2, 0), (WINDOW_WIDTH // 2, WINDOW_HEIGHT))
         pygame.draw.line(screen, GUIDE_COLOR, (0, WINDOW_HEIGHT // 2), (WINDOW_WIDTH, WINDOW_HEIGHT // 2))
 
-        # Arena rectangle
+        # Arena rectangle (white fill; red border is drawn last so it stays on top)
         arena_rect = pygame.Rect(arena_x, arena_y, arena_w, arena_h)
         pygame.draw.rect(screen, BORDER_COLOR, arena_rect)
-        pygame.draw.rect(screen, (255, 0, 0), arena_rect, BORDER_THICKNESS)
 
         # ── Arena origin TF axes ─────────────────────────────────────────────
         # Draw +X (red, right) and +Y (green, up) axes at arena (0,0) = BL corner
@@ -586,39 +588,6 @@ def main():
         screen.blit(_tf_font.render("+X", True, (255, 50, 50)),  (_ox + _tf_len + 2, _oy - 8))
         screen.blit(_tf_font.render("+Y", True, (50, 255, 50)),  (_ox + 2, _oy - _tf_len - 12))
         screen.blit(_tf_font.render("0", True, (180, 180, 180)), (_ox + 3, _oy + 3))
-
-        # ── Corner markers ───────────────────────────────────────────────────
-        positions = corner_screen_positions()
-        with corners_lock:
-            for i, (cx, cy) in enumerate(positions):
-                c = corners[i]
-                if c["known"]:
-                    color = COLOR_MAP.get(c["marker_id"], (0, 200, 100))
-                    text = f"#{c['marker_id']}"
-                else:
-                    color = CORNER_UNKNOWN_COLOR
-                    text = "?"
-
-                r = CORNER_RADIUS
-                size = r * 2
-                arc_rect = pygame.Rect(cx - r, cy - r, size, size)
-
-                if i == 0:    # TL
-                    pygame.draw.arc(screen, color, arc_rect, 3 * math.pi / 2, 2 * math.pi, 2)
-                    label_off = (cx + r // 2, cy + r // 2)
-                elif i == 1:  # TR
-                    pygame.draw.arc(screen, color, arc_rect, math.pi, 3 * math.pi / 2, 2)
-                    label_off = (cx - r // 2, cy + r // 2)
-                elif i == 2:  # BR
-                    pygame.draw.arc(screen, color, arc_rect, math.pi / 2, math.pi, 2)
-                    label_off = (cx - r // 2, cy - r // 2)
-                else:         # BL
-                    pygame.draw.arc(screen, color, arc_rect, 0, math.pi / 2, 2)
-                    label_off = (cx + r // 2, cy - r // 2)
-
-                label_surf = corner_font.render(text, True, color)
-                label_rect = label_surf.get_rect(center=label_off)
-                screen.blit(label_surf, label_rect)
 
         # ── Path trails ──────────────────────────────────────────────────────
         # Drawn first so pucks / scan / robot render on top of them.
@@ -633,14 +602,15 @@ def main():
             pygame.draw.lines(screen, PATH_COLOR_OPTITRACK, False, screen_path, PATH_THICKNESS)
 
         # ── Pucks ────────────────────────────────────────────────────────────
+        puck_radius_px = max(1, int((PUCK_DIAMETER_M / 2) * (arena_w / ARENA_METERS_W)))
         with pucks_lock:
             for p in pucks:
                 color = COLOR_MAP.get(p.get("color"), (200, 200, 200))
                 ax, ay = odom_to_arena(p.get("x", 0), p.get("y", 0))
                 sx, sy = map_to_screen(ax, ay)
-                pygame.draw.circle(screen, color, (sx, sy), PUCK_DRAW_RADIUS)
+                pygame.draw.circle(screen, color, (sx, sy), puck_radius_px)
                 if p.get("status") == 1:  # placed at home
-                    pygame.draw.circle(screen, (255, 255, 255), (sx, sy), PUCK_DRAW_RADIUS + 3, 2)
+                    pygame.draw.circle(screen, (0, 0, 0), (sx, sy), puck_radius_px + 3, 2)
 
         # ── Lidar scan ───────────────────────────────────────────────────────
         # Drawn under the robot so the robot icon stays readable.
@@ -715,6 +685,85 @@ def main():
             for i, line in enumerate(lines):
                 text = font.render(line, True, (100, 100, 100))
                 screen.blit(text, (10, 10 + i * 20))
+
+        # Red border is drawn after content so it always stays in front of pucks/
+        # robot/scan. Corner markers are drawn AFTER the border so their black
+        # outline and colored fill remain visible at the very corners.
+        pygame.draw.rect(screen, (255, 0, 0), arena_rect, BORDER_THICKNESS)
+
+        # ── Corner markers ───────────────────────────────────────────────────
+        # Count pucks per color: total and delivered (status == 1 = at home).
+        with pucks_lock:
+            puck_total: dict[int, int] = {}
+            puck_delivered: dict[int, int] = {}
+            for p in pucks:
+                col = p.get("color")
+                if col is None:
+                    continue
+                try:
+                    col = int(col)
+                except (TypeError, ValueError):
+                    continue
+                puck_total[col] = puck_total.get(col, 0) + 1
+                if p.get("status") == 1:
+                    puck_delivered[col] = puck_delivered.get(col, 0) + 1
+            for col in puck_total:
+                puck_delivered.setdefault(col, 0)
+
+        positions = corner_screen_positions()
+        # Inset offsets so the corner pie sits just inside the red border.
+        b = BORDER_THICKNESS
+        inset = [(+b, +b), (-b, +b), (-b, -b), (+b, -b)]  # TL, TR, BR, BL
+        # The goal pose's quadrant is the robot's home corner — never draw a pie there.
+        goal_ax, goal_ay = optitrack_to_arena(GOAL_X, GOAL_Y)
+        goal_slot = corner_slot_for(goal_ax, goal_ay)
+        with corners_lock:
+            for i, (cx, cy) in enumerate(positions):
+                if i == goal_slot:
+                    continue
+                dx, dy = inset[i]
+                cx, cy = cx + dx, cy + dy
+                c = corners[i]
+                if c["known"]:
+                    color = COLOR_MAP.get(c["marker_id"], (0, 200, 100))
+                    total = puck_total.get(c["marker_id"], 0)
+                    delivered = puck_delivered.get(c["marker_id"], 0)
+                    text = f"{delivered}/{total}"
+                    text_color = CORNER_TEXT_COLOR
+                else:
+                    color = CORNER_UNKNOWN_COLOR
+                    text = "?"
+                    text_color = color
+
+                r = CORNER_RADIUS
+                label_d = int(r * 0.45)
+                if i == 0:    # TL slot (arc sweep toward BR of corner = into arena)
+                    start_a, end_a = 3 * math.pi / 2, 2 * math.pi
+                    label_off = (cx + label_d, cy + label_d)
+                elif i == 1:  # TR slot
+                    start_a, end_a = math.pi, 3 * math.pi / 2
+                    label_off = (cx - label_d, cy + label_d)
+                elif i == 2:  # BR slot
+                    start_a, end_a = math.pi / 2, math.pi
+                    label_off = (cx - label_d, cy - label_d)
+                else:         # BL slot
+                    start_a, end_a = 0, math.pi / 2
+                    label_off = (cx + label_d, cy - label_d)
+
+                segments = 48
+                pie_points = [(cx, cy)]
+                for s in range(segments + 1):
+                    t = start_a + (end_a - start_a) * s / segments
+                    pie_points.append((cx + r * math.cos(t), cy - r * math.sin(t)))
+                if c["known"]:
+                    pygame.draw.polygon(screen, color, pie_points)
+                pygame.draw.polygon(
+                    screen, CORNER_OUTLINE_COLOR, pie_points, CORNER_OUTLINE_THICKNESS
+                )
+
+                label_surf = corner_font.render(text, True, text_color)
+                label_rect = label_surf.get_rect(center=label_off)
+                screen.blit(label_surf, label_rect)
 
         pygame.display.flip()
         clock.tick(60)
