@@ -28,11 +28,8 @@ from lucid_component_viz.arena.config import (
     ConfigError,
     compute_bl_optitrack,
     parse_env_config,
-)
-from lucid_component_viz.arena.config import (
+    quaternion_to_yaw,
     odom_to_arena as _odom_to_arena,
-)
-from lucid_component_viz.arena.config import (
     optitrack_to_arena as _optitrack_to_arena,
 )
 
@@ -40,23 +37,26 @@ from lucid_component_viz.arena.config import (
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# ── Calibrated arena (538px = 2.1m x 2.1m) ─────────────────────────────────
-arena_w = 538
-arena_h = 538
-arena_x = 890
-arena_y = 0
+# ── Calibrated arena (828px = 2.1m x 2.1m) ─────────────────────────────────
+arena_w = 828
+arena_h = 828
+arena_x = 516
+arena_y = 215
 
 ARENA_METERS_W = 2.1
 ARENA_METERS_H = 2.1
 
 # ── Visual ───────────────────────────────────────────────────────────────────
-BORDER_THICKNESS = 4
+BORDER_THICKNESS = 8
 BORDER_COLOR = (255, 255, 255)
 BG_COLOR = (0, 0, 0)
 GUIDE_COLOR = (40, 40, 40)
 CORNER_UNKNOWN_COLOR = (100, 100, 100)
-CORNER_RADIUS = 84
-CORNER_FONT_SIZE = 14
+CORNER_OUTLINE_COLOR = (0, 0, 0)
+CORNER_OUTLINE_THICKNESS = 6
+CORNER_RADIUS = 120
+CORNER_FONT_SIZE = 24
+CORNER_TEXT_COLOR = (0, 0, 0)
 
 RESIZE_STEP = 10
 FINE_STEP = 1
@@ -67,8 +67,8 @@ COLOR_MAP = {
     2: (0, 255, 0),
     3: (0, 0, 255),
 }
-PUCK_DRAW_RADIUS = 8
-ROBOT_SIZE = 15
+PUCK_DIAMETER_M = 0.06
+ROBOT_SIZE = 35
 ROBOT_COLOR_OPTITRACK = (255, 255, 0)   # yellow
 ROBOT_COLOR_ODOM      = (0, 200, 255)   # cyan
 
@@ -80,7 +80,7 @@ SCAN_DOWNSAMPLE = 2                     # draw every Nth range (1 = all)
 # Path trails (breadcrumbs of where the robot has been)
 PATH_COLOR_ODOM      = (0, 120, 180)    # dim cyan, related to odom robot colour
 PATH_COLOR_OPTITRACK = (180, 180, 0)    # dim yellow, related to optitrack robot colour
-PATH_THICKNESS = 2
+PATH_THICKNESS = 6
 PATH_MAX_POINTS = 2000                  # ~ several minutes of motion
 PATH_MIN_STEP_M = 0.01                  # only append if robot moved >= 1 cm
 
@@ -107,10 +107,15 @@ BL_OPTITRACK_X, BL_OPTITRACK_Y = compute_bl_optitrack(
 )
 GOAL_X = _ROBOT_CFG.goal_x
 GOAL_Y = _ROBOT_CFG.goal_y
+# Quaternion-derived yaw (raw OT pose). The optitrack driver's Motive Y-up →
+# ROS Z-up axis swap leaves positions in the same frame but rotates
+# orientations by an extra 90° in the floor plane. The robot's physical
+# heading in world frame is therefore GOAL_YAW + π/2, and we use that
+# corrected value everywhere we map FROM the odom/robot frame.
 GOAL_YAW = _ROBOT_CFG.goal_yaw
-# Net yaw rotation from odom to arena: rotate by GOAL_YAW (odom→world)
-# then by π (world→arena axis flip). Used to map yaw values (not positions).
-ODOM_TO_ARENA_YAW = GOAL_YAW + math.pi
+GOAL_HEADING = GOAL_YAW + math.pi / 2
+# odom → arena yaw: heading (odom→world) then π for world→arena 180° flip.
+ODOM_TO_ARENA_YAW = GOAL_HEADING + math.pi
 
 print(
     f"[arena] config: anchor={_ARENA_CFG.anchor_corner} "
@@ -171,23 +176,11 @@ def optitrack_to_arena(ox, oy):
 
 def odom_to_arena(ox, oy):
     """Robot-tree (odom) frame → arena frame.
-    Composition: odom → world (rotate by GOAL_YAW, translate by goal pose),
-    then world → arena (axis-flipped translation)."""
+    Composition: odom → world (rotate by GOAL_HEADING, translate by goal
+    pose), then world → arena (axis-flipped translation)."""
     return _odom_to_arena(
-        BL_OPTITRACK_X, BL_OPTITRACK_Y, GOAL_X, GOAL_Y, GOAL_YAW, ox, oy
+        BL_OPTITRACK_X, BL_OPTITRACK_Y, GOAL_X, GOAL_Y, GOAL_HEADING, ox, oy
     )
-
-
-def map_to_arena(mx, my):
-    """ROS map frame → arena frame. Map shares origin/rotation with odom."""
-    return odom_to_arena(mx, my)
-
-
-def quaternion_to_yaw(qx, qy, qz, qw):
-    """Extract yaw angle (radians) from quaternion."""
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return math.atan2(siny_cosp, cosy_cosp)
 
 
 def corner_screen_positions():
@@ -250,7 +243,7 @@ def _handle_aruco_registry(payload):
         y = m.get("y")
         if marker_id is None or x is None or y is None:
             continue
-        ax, ay = map_to_arena(float(x), float(y))
+        ax, ay = odom_to_arena(float(x), float(y))
         mid = int(marker_id)
         assign_corner(mid, ax, ay)
         if mid not in seen_marker_ids:
@@ -372,7 +365,7 @@ def _handle_scan(payload):
     yaw_odom = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
 
     # Robot heading in arena frame: rotate odom yaw by ODOM_TO_ARENA_YAW
-    # (= GOAL_YAW + π, the combined odom→world→arena rotation for directions).
+    # (= GOAL_YAW + 3π/2; see comment near ODOM_TO_ARENA_YAW for derivation).
     yaw_arena = yaw_odom + ODOM_TO_ARENA_YAW
 
     # Robot position in arena frame.
@@ -583,10 +576,9 @@ def main():
         pygame.draw.line(screen, GUIDE_COLOR, (WINDOW_WIDTH // 2, 0), (WINDOW_WIDTH // 2, WINDOW_HEIGHT))
         pygame.draw.line(screen, GUIDE_COLOR, (0, WINDOW_HEIGHT // 2), (WINDOW_WIDTH, WINDOW_HEIGHT // 2))
 
-        # Arena rectangle
+        # Arena rectangle (white fill; red border is drawn last so it stays on top)
         arena_rect = pygame.Rect(arena_x, arena_y, arena_w, arena_h)
         pygame.draw.rect(screen, BORDER_COLOR, arena_rect)
-        pygame.draw.rect(screen, (255, 0, 0), arena_rect, BORDER_THICKNESS)
 
         # ── Arena origin TF axes ─────────────────────────────────────────────
         # Draw +X (red, right) and +Y (green, up) axes at arena (0,0) = BL corner
@@ -598,39 +590,6 @@ def main():
         screen.blit(_tf_font.render("+X", True, (255, 50, 50)),  (_ox + _tf_len + 2, _oy - 8))
         screen.blit(_tf_font.render("+Y", True, (50, 255, 50)),  (_ox + 2, _oy - _tf_len - 12))
         screen.blit(_tf_font.render("0", True, (180, 180, 180)), (_ox + 3, _oy + 3))
-
-        # ── Corner markers ───────────────────────────────────────────────────
-        positions = corner_screen_positions()
-        with corners_lock:
-            for i, (cx, cy) in enumerate(positions):
-                c = corners[i]
-                if c["known"]:
-                    color = COLOR_MAP.get(c["marker_id"], (0, 200, 100))
-                    text = f"#{c['marker_id']}"
-                else:
-                    color = CORNER_UNKNOWN_COLOR
-                    text = "?"
-
-                r = CORNER_RADIUS
-                size = r * 2
-                arc_rect = pygame.Rect(cx - r, cy - r, size, size)
-
-                if i == 0:    # TL
-                    pygame.draw.arc(screen, color, arc_rect, 3 * math.pi / 2, 2 * math.pi, 2)
-                    label_off = (cx + r // 2, cy + r // 2)
-                elif i == 1:  # TR
-                    pygame.draw.arc(screen, color, arc_rect, math.pi, 3 * math.pi / 2, 2)
-                    label_off = (cx - r // 2, cy + r // 2)
-                elif i == 2:  # BR
-                    pygame.draw.arc(screen, color, arc_rect, math.pi / 2, math.pi, 2)
-                    label_off = (cx - r // 2, cy - r // 2)
-                else:         # BL
-                    pygame.draw.arc(screen, color, arc_rect, 0, math.pi / 2, 2)
-                    label_off = (cx + r // 2, cy - r // 2)
-
-                label_surf = corner_font.render(text, True, color)
-                label_rect = label_surf.get_rect(center=label_off)
-                screen.blit(label_surf, label_rect)
 
         # ── Path trails ──────────────────────────────────────────────────────
         # Drawn first so pucks / scan / robot render on top of them.
@@ -645,14 +604,15 @@ def main():
             pygame.draw.lines(screen, PATH_COLOR_OPTITRACK, False, screen_path, PATH_THICKNESS)
 
         # ── Pucks ────────────────────────────────────────────────────────────
+        puck_radius_px = max(1, int((PUCK_DIAMETER_M / 2) * (arena_w / ARENA_METERS_W)))
         with pucks_lock:
             for p in pucks:
                 color = COLOR_MAP.get(p.get("color"), (200, 200, 200))
-                ax, ay = map_to_arena(p.get("x", 0), p.get("y", 0))
+                ax, ay = odom_to_arena(p.get("x", 0), p.get("y", 0))
                 sx, sy = map_to_screen(ax, ay)
-                pygame.draw.circle(screen, color, (sx, sy), PUCK_DRAW_RADIUS)
+                pygame.draw.circle(screen, color, (sx, sy), puck_radius_px)
                 if p.get("status") == 1:  # placed at home
-                    pygame.draw.circle(screen, (255, 255, 255), (sx, sy), PUCK_DRAW_RADIUS + 3, 2)
+                    pygame.draw.circle(screen, (0, 0, 0), (sx, sy), puck_radius_px + 3, 2)
 
         # ── Lidar scan ───────────────────────────────────────────────────────
         # Drawn under the robot so the robot icon stays readable.
@@ -668,11 +628,9 @@ def main():
             od_pos = robot_pose_odom["position"]
             od_ori = robot_pose_odom["orientation"]
 
-        def draw_robot(ax, ay, ori, color, yaw_offset=0.0, negate_yaw=False):
+        def draw_robot(ax, ay, ori, color, yaw_offset=0.0):
             sx, sy = map_to_screen(ax, ay)
             yaw = quaternion_to_yaw(ori["x"], ori["y"], ori["z"], ori["w"])
-            if negate_yaw:
-                yaw = -yaw
             yaw += yaw_offset
             s = ROBOT_SIZE
             tip   = (sx + int(s * math.cos(yaw)),             sy - int(s * math.sin(yaw)))
@@ -682,7 +640,7 @@ def main():
 
         if ot_pos and ot_ori:
             ax, ay = optitrack_to_arena(ot_pos["x"], ot_pos["y"])
-            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=0.0, negate_yaw=True)
+            draw_robot(ax, ay, ot_ori, ROBOT_COLOR_OPTITRACK, yaw_offset=3 * math.pi / 2)
         if od_pos and od_ori:
             ax, ay = odom_to_arena(od_pos["x"], od_pos["y"])
             draw_robot(ax, ay, od_ori, ROBOT_COLOR_ODOM, yaw_offset=ODOM_TO_ARENA_YAW)
@@ -700,7 +658,7 @@ def main():
             "x": _ROBOT_CFG.goal_qx, "y": _ROBOT_CFG.goal_qy,
             "z": _ROBOT_CFG.goal_qz, "w": _ROBOT_CFG.goal_qw,
         }
-        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=0.0, negate_yaw=True)
+        draw_robot(_goal_ax, _goal_ay, _goal_ori, (255, 0, 255), yaw_offset=3 * math.pi / 2)
         _goal_sx, _goal_sy = map_to_screen(_goal_ax, _goal_ay)
         if 0 <= _goal_sx < WINDOW_WIDTH and 0 <= _goal_sy < WINDOW_HEIGHT:
             screen.blit(_tf_font.render("GOAL", True, (255, 0, 255)), (_goal_sx + 12, _goal_sy - 6))
@@ -729,6 +687,86 @@ def main():
             for i, line in enumerate(lines):
                 text = font.render(line, True, (100, 100, 100))
                 screen.blit(text, (10, 10 + i * 20))
+
+        # Border is drawn after content so it always stays in front of pucks/
+        # robot/scan. Corner markers are drawn AFTER the border so their black
+        # outline and colored fill remain visible at the very corners. Hot pink
+        # avoids clashing with red/green/blue pucks and the magenta GOAL marker.
+        pygame.draw.rect(screen, (255, 105, 180), arena_rect, BORDER_THICKNESS)
+
+        # ── Corner markers ───────────────────────────────────────────────────
+        # Count pucks per color: total and delivered (status == 1 = at home).
+        with pucks_lock:
+            puck_total: dict[int, int] = {}
+            puck_delivered: dict[int, int] = {}
+            for p in pucks:
+                col = p.get("color")
+                if col is None:
+                    continue
+                try:
+                    col = int(col)
+                except (TypeError, ValueError):
+                    continue
+                puck_total[col] = puck_total.get(col, 0) + 1
+                if p.get("status") == 1:
+                    puck_delivered[col] = puck_delivered.get(col, 0) + 1
+            for col in puck_total:
+                puck_delivered.setdefault(col, 0)
+
+        positions = corner_screen_positions()
+        # Inset offsets so the corner pie sits just inside the red border.
+        b = BORDER_THICKNESS
+        inset = [(+b, +b), (-b, +b), (-b, -b), (+b, -b)]  # TL, TR, BR, BL
+        # The goal pose's quadrant is the robot's home corner — never draw a pie there.
+        goal_ax, goal_ay = optitrack_to_arena(GOAL_X, GOAL_Y)
+        goal_slot = corner_slot_for(goal_ax, goal_ay)
+        with corners_lock:
+            for i, (cx, cy) in enumerate(positions):
+                if i == goal_slot:
+                    continue
+                dx, dy = inset[i]
+                cx, cy = cx + dx, cy + dy
+                c = corners[i]
+                if c["known"]:
+                    color = COLOR_MAP.get(c["marker_id"], (0, 200, 100))
+                    total = puck_total.get(c["marker_id"], 0)
+                    delivered = puck_delivered.get(c["marker_id"], 0)
+                    text = f"{delivered}/{total}"
+                    text_color = CORNER_TEXT_COLOR
+                else:
+                    color = CORNER_UNKNOWN_COLOR
+                    text = "?"
+                    text_color = color
+
+                r = CORNER_RADIUS
+                label_d = int(r * 0.45)
+                if i == 0:    # TL slot (arc sweep toward BR of corner = into arena)
+                    start_a, end_a = 3 * math.pi / 2, 2 * math.pi
+                    label_off = (cx + label_d, cy + label_d)
+                elif i == 1:  # TR slot
+                    start_a, end_a = math.pi, 3 * math.pi / 2
+                    label_off = (cx - label_d, cy + label_d)
+                elif i == 2:  # BR slot
+                    start_a, end_a = math.pi / 2, math.pi
+                    label_off = (cx - label_d, cy - label_d)
+                else:         # BL slot
+                    start_a, end_a = 0, math.pi / 2
+                    label_off = (cx + label_d, cy - label_d)
+
+                segments = 48
+                pie_points = [(cx, cy)]
+                for s in range(segments + 1):
+                    t = start_a + (end_a - start_a) * s / segments
+                    pie_points.append((cx + r * math.cos(t), cy - r * math.sin(t)))
+                if c["known"]:
+                    pygame.draw.polygon(screen, color, pie_points)
+                pygame.draw.polygon(
+                    screen, CORNER_OUTLINE_COLOR, pie_points, CORNER_OUTLINE_THICKNESS
+                )
+
+                label_surf = corner_font.render(text, True, text_color)
+                label_rect = label_surf.get_rect(center=label_off)
+                screen.blit(label_surf, label_rect)
 
         pygame.display.flip()
         clock.tick(60)
