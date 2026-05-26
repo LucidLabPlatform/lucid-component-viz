@@ -107,13 +107,15 @@ BL_OPTITRACK_X, BL_OPTITRACK_Y = compute_bl_optitrack(
 )
 GOAL_X = _ROBOT_CFG.goal_x
 GOAL_Y = _ROBOT_CFG.goal_y
+# Quaternion-derived yaw (raw OT pose). The optitrack driver's Motive Y-up →
+# ROS Z-up axis swap leaves positions in the same frame but rotates
+# orientations by an extra 90° in the floor plane. The robot's physical
+# heading in world frame is therefore GOAL_YAW + π/2, and we use that
+# corrected value everywhere we map FROM the odom/robot frame.
 GOAL_YAW = _ROBOT_CFG.goal_yaw
-# Net yaw rotation from odom to arena: rotate by GOAL_YAW (odom→world),
-# then by π (world→arena 180° axis flip), then by another π/2 to compensate
-# for the OT pose quaternion's 90° offset (Motive Y-up → ROS Z-up axis swap
-# in the optitrack driver rotates orientations 90° in the floor plane even
-# though positions remain in a 180°-rotated frame). Total: GOAL_YAW + 3π/2.
-ODOM_TO_ARENA_YAW = GOAL_YAW + 3 * math.pi / 2
+GOAL_HEADING = GOAL_YAW + math.pi / 2
+# odom → arena yaw: heading (odom→world) then π for world→arena 180° flip.
+ODOM_TO_ARENA_YAW = GOAL_HEADING + math.pi
 
 print(
     f"[arena] config: anchor={_ARENA_CFG.anchor_corner} "
@@ -174,10 +176,10 @@ def optitrack_to_arena(ox, oy):
 
 def odom_to_arena(ox, oy):
     """Robot-tree (odom) frame → arena frame.
-    Composition: odom → world (rotate by GOAL_YAW, translate by goal pose),
-    then world → arena (axis-flipped translation)."""
+    Composition: odom → world (rotate by GOAL_HEADING, translate by goal
+    pose), then world → arena (axis-flipped translation)."""
     return _odom_to_arena(
-        BL_OPTITRACK_X, BL_OPTITRACK_Y, GOAL_X, GOAL_Y, GOAL_YAW, ox, oy
+        BL_OPTITRACK_X, BL_OPTITRACK_Y, GOAL_X, GOAL_Y, GOAL_HEADING, ox, oy
     )
 
 
@@ -686,10 +688,11 @@ def main():
                 text = font.render(line, True, (100, 100, 100))
                 screen.blit(text, (10, 10 + i * 20))
 
-        # Red border is drawn after content so it always stays in front of pucks/
+        # Border is drawn after content so it always stays in front of pucks/
         # robot/scan. Corner markers are drawn AFTER the border so their black
-        # outline and colored fill remain visible at the very corners.
-        pygame.draw.rect(screen, (255, 0, 0), arena_rect, BORDER_THICKNESS)
+        # outline and colored fill remain visible at the very corners. Hot pink
+        # avoids clashing with red/green/blue pucks and the magenta GOAL marker.
+        pygame.draw.rect(screen, (255, 105, 180), arena_rect, BORDER_THICKNESS)
 
         # ── Corner markers ───────────────────────────────────────────────────
         # Count pucks per color: total and delivered (status == 1 = at home).
